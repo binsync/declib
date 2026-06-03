@@ -5,27 +5,18 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "libbs"
 classifiers = [
+    "Development Status :: 7 - Inactive",
     "License :: OSI Approved :: BSD License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.12",
 ]
 license = {text = "BSD 2 Clause"}
-description = "Your Only Decompiler API Lib - A generic API to script in and out of decompilers"
-urls = {Homepage = "https://github.com/binsync/libbs"}
+description = "Deprecated: 'libbs' has been renamed to 'declib'. Install 'declib' instead."
+urls = {Homepage = "https://github.com/binsync/declib"}
 requires-python = ">= 3.10"
 dependencies = [
-    "toml",
-    "ply",
-    "pycparser~=3.0",
-    "setuptools",
-    "prompt_toolkit",
-    "tqdm",
-    "psutil",
-    "pyghidra",
-    "platformdirs",
-    "filelock",
-    "networkx"
+    "declib",
 ]
 dynamic = ["version"]
 
@@ -33,27 +24,9 @@ dynamic = ["version"]
 file = "README.md"
 content-type = "text/markdown"
 
-[project.optional-dependencies]
-test = [
-    "pytest",
-    "angr",
-    "requests",
-    "ipdb"
-]
-ghidra = [
-    "PySide6-Essentials>=6.4.2,!=6.7.0"
-]
-
-[project.scripts]
-libbs = "libbs.__main__:main"
-decompiler = "libbs.cli:main"
-
 [tool.setuptools]
 include-package-data = true
 license-files = ["LICENSE"]
-
-[tool.setuptools.package-data]
-"libbs.skills" = ["**/SKILL.md", "**/*.md"]
 
 [tool.setuptools.packages]
 find = {namespaces = false}
