@@ -27,7 +27,13 @@ def open_program(
         raise ValueError("You must provide either a binary path or a project location.")
 
     if not PyGhidraLauncher.has_launched():
-        HeadlessPyGhidraLauncher().start()
+        launcher = HeadlessPyGhidraLauncher()
+        # Force the JVM into AWT-headless mode. The "headless" launcher does not
+        # set this itself, so if a (possibly stale) DISPLAY is exported Ghidra's
+        # JVM tries to reach an X server and dies with:
+        #   java.awt.AWTError: Can't connect to X11 window server ...
+        launcher.add_vmargs("-Djava.awt.headless=true")
+        launcher.start()
 
     from ghidra.app.script import GhidraScriptUtil
     from ghidra.program.flatapi import FlatProgramAPI

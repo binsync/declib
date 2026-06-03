@@ -1237,14 +1237,30 @@ class GhidraDecompilerInterface(DecompilerInterface):
         except Exception as e:
             parsed_type = None
 
-        # attempt a lookup as a custom datatype
-        if parsed_type is None:
-            typestr = "/" + typestr if not typestr.startswith("/") else typestr
-            parsed_type = self.currentProgram.getDataTypeManager().getDataType(typestr)
+        dtm = self.currentProgram.getDataTypeManager()
 
-        #if self.headless and parsed_type is None:
-        #    # try again in headless mode only!
-        #    parsed_type = self._headless_lookup_struct(typestr)
+        # attempt a lookup as a custom datatype by name (e.g. "Point")
+        if parsed_type is None:
+            lookup = typestr if typestr.startswith("/") else "/" + typestr
+            parsed_type = dtm.getDataType(lookup)
+
+        # attempt to resolve a pointer to a custom datatype (e.g. "Point *"):
+        # DataTypeParser can't resolve user structs by bare name and the path
+        # lookup above only matches non-pointer names, so build the pointer
+        # explicitly from the resolved base type.
+        if parsed_type is None and typestr.rstrip().endswith("*"):
+            base_str = typestr.strip()
+            ptr_levels = 0
+            while base_str.endswith("*"):
+                base_str = base_str[:-1].strip()
+                ptr_levels += 1
+            base_lookup = base_str if base_str.startswith("/") else "/" + base_str
+            base_dt = dtm.getDataType(base_lookup)
+            if base_dt is not None:
+                from ghidra.program.model.data import PointerDataType
+                parsed_type = base_dt
+                for _ in range(ptr_levels):
+                    parsed_type = PointerDataType(parsed_type)
 
         if parsed_type is None:
             _l.warning("Failed to parse type string: %s", typestr)

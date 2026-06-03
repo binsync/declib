@@ -16,6 +16,9 @@ Subcommands implemented:
 - xref_to         data + code references to a target
 - xref_from       things a function calls (callees)
 - rename          rename a function or local variable
+- create-type     define a new struct/enum/typedef from a C string
+- retype          change the type of a function's variable or argument
+- sync            copy work on a function from one server into another
 - list_strings    list strings in the binary, optionally filtered by regex
 - get_callers     functions (call sites only) that call a target
 - read_memory     read raw bytes from the binary at an address
@@ -725,6 +728,196 @@ def cmd_rename(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# create-type / retype
+# ---------------------------------------------------------------------------
+
+def cmd_create_type(args) -> int:
+    """Define a new struct/enum/typedef from a C string and apply it.
+
+    The definition is parsed (client-side, decompiler-free) into a libbs
+    artifact and pushed through the normal type-setting path, which works
+    across every backend.
+    """
+    from libbs.api.type_definition_parser import (
+        parse_type_definition, TypeDefinitionParseError,
+    )
+
+    try:
+        artifact = parse_type_definition(args.definition)
+    except TypeDefinitionParseError as exc:
+        # Fail before connecting — nothing about a server changes the parse.
+        raise SystemExit(f"Could not parse type definition: {exc}")
+
+    with _with_client(args) as client:
+        ok = bool(client.set_artifact(artifact))
+        _emit(args, {
+            "kind": type(artifact).__name__,
+            "name": artifact.name,
+            "size": getattr(artifact, "size", None),
+            "members": len(artifact.members) if hasattr(artifact, "members") else None,
+            "success": ok,
+        })
+    return EXIT_OK if ok else EXIT_USER_ERROR
+
+
+def _find_variable(func, var_name: str):
+    """Locate a variable by name in a function. Returns (kind, var) or (None, None).
+
+    Stack variables are checked before arguments. ``kind`` is "stack" or "arg".
+    """
+    for svar in func.stack_vars.values():
+        if svar.name == var_name:
+            return "stack", svar
+    if func.header is not None:
+        for arg in func.header.args.values():
+            if arg.name == var_name:
+                return "arg", arg
+    return None, None
+
+
+def _compute_type_size(client, type_str: str) -> int:
+    """Best-effort byte size for a (possibly user-defined) type string."""
+    ctype = client.type_parser.parse_type(type_str)
+    if ctype is not None and ctype.size:
+        return ctype.size
+    # Unknown/user-defined non-pointer type (e.g. a struct by value): ask the
+    # backend what it already knows about this type.
+    try:
+        defined = client.get_defined_type(type_str)
+    except Exception:
+        defined = None
+    size = getattr(defined, "size", None)
+    if size:
+        return size
+    # 0 means "let the backend infer the size".
+    return ctype.size if ctype is not None else 0
+
+
+def cmd_retype(args) -> int:
+    """Change the type of a local variable or argument of a function."""
+    with _with_client(args) as client:
+        func_addr = _resolve_function_addr(client, args.function)
+        if func_addr is None:
+            raise SystemExit(f"Function not found: {args.function!r}")
+        func = client.functions[func_addr]
+        if not func:
+            raise SystemExit(f"Could not load function at 0x{func_addr:x}")
+
+        kind, var = _find_variable(func, args.variable)
+        if var is None:
+            raise SystemExit(
+                f"Variable {args.variable!r} not found in {args.function!r}. "
+                "Check the name (it is case-sensitive)."
+            )
+
+        var.type = args.new_type
+        var.size = _compute_type_size(client, args.new_type)
+
+        ok = bool(client.set_artifact(func))
+        if not ok:
+            raise SystemExit(
+                f"Backend rejected retype of {args.variable!r} to {args.new_type!r}."
+            )
+
+        # Re-read so the caller can see what the backend actually stored.
+        refreshed = client.functions[func_addr]
+        _, new_var = _find_variable(refreshed, args.variable)
+        _emit(args, {
+            "function_addr": func_addr,
+            "variable": args.variable,
+            "kind": kind,
+            "new_type": args.new_type,
+            "applied_type": getattr(new_var, "type", None) if new_var else None,
+            "success": ok,
+        })
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# sync
+# ---------------------------------------------------------------------------
+
+def cmd_sync(args) -> int:
+    """Copy work on a function from one running server into another.
+
+    Source is selected by --from-id; destination by the usual
+    --id/--binary/--backend. Syncs the function's referenced user types
+    (struct/enum/typedef) first, then the function header (name/return/args)
+    and stack variables. Addresses and stack offsets are canonical in lifted
+    form, so they re-key correctly on the destination even if it names the
+    function differently.
+    """
+    from libbs.artifacts import Struct, Enum, Typedef
+
+    src_record = _select_server(server_id=args.from_id, binary_path=None, backend=None)
+    dst_record = _select_server(
+        server_id=getattr(args, "id", None),
+        binary_path=getattr(args, "binary", None),
+        backend=getattr(args, "backend", None),
+    )
+    if src_record.get("id") == dst_record.get("id"):
+        raise SystemExit(
+            f"Source and destination are the same server (id={src_record.get('id')}). "
+            "Pick two different servers."
+        )
+
+    src = _connect_client(src_record)
+    dst = None
+    try:
+        dst = _connect_client(dst_record)
+
+        addr = _resolve_function_addr(src, args.target)
+        known = _known_function_addrs(src)
+        if addr is None or (known and addr not in known):
+            raise SystemExit(f"Function not found on source: {args.target!r}")
+
+        src_func = src.functions[addr]
+        if not src_func:
+            raise SystemExit(f"Could not load function at 0x{addr:x} on source")
+
+        # 1) Sync referenced user types first so retypes resolve on the dest.
+        synced_types, failed_types = [], []
+        try:
+            deps = src.get_dependencies(src_func, decompile=True)
+        except Exception as exc:
+            _l.debug("get_dependencies failed: %s", exc)
+            deps = []
+        for dep in deps:
+            if isinstance(dep, (Struct, Enum, Typedef)):
+                name = getattr(dep, "name", None)
+                try:
+                    ok_dep = bool(dst.set_artifact(dep))
+                except Exception as exc:
+                    _l.debug("type sync failed for %s: %s", name, exc)
+                    ok_dep = False
+                (synced_types if ok_dep else failed_types).append(name)
+
+        # 2) Sync the function header + stack vars in one shot.
+        func_ok = bool(dst.set_artifact(src_func))
+
+        synced_vars = sorted(
+            (sv.offset, getattr(sv, "name", None))
+            for sv in (src_func.stack_vars or {}).values()
+        )
+        _emit(args, {
+            "target": args.target,
+            "addr": addr,
+            "from_id": src_record.get("id"),
+            "to_id": dst_record.get("id"),
+            "function_name": src_func.name,
+            "synced_types": synced_types,
+            "failed_types": failed_types,
+            "synced_stack_vars": [{"offset": off, "name": nm} for off, nm in synced_vars],
+            "success": func_ok,
+        })
+        return EXIT_OK if func_ok else EXIT_USER_ERROR
+    finally:
+        src.shutdown()
+        if dst is not None:
+            dst.shutdown()
+
+
+# ---------------------------------------------------------------------------
 # list_strings / get_callers (new core APIs)
 # ---------------------------------------------------------------------------
 
@@ -1148,6 +1341,55 @@ def build_parser() -> argparse.ArgumentParser:
     _add_server_filter_args(p_ren)
     _add_output_args(p_ren)
     p_ren.set_defaults(func=cmd_rename)
+
+    # create-type
+    p_ct = sub.add_parser(
+        "create-type",
+        help=(
+            "Define a new struct, enum, or typedef from a C definition string "
+            "and apply it to the binary's type database."
+        ),
+    )
+    p_ct.add_argument(
+        "definition",
+        help=(
+            'C type definition, e.g. "struct Point { int x; int y; }", '
+            '"enum Color { RED, GREEN, BLUE }", or "typedef int my_int_t".'
+        ),
+    )
+    _add_server_filter_args(p_ct)
+    _add_output_args(p_ct)
+    p_ct.set_defaults(func=cmd_create_type)
+
+    # retype
+    p_rt = sub.add_parser(
+        "retype",
+        help="Change the type of a function's local variable or argument.",
+    )
+    p_rt.add_argument("function", help="Function name or address (hex/decimal).")
+    p_rt.add_argument("variable", help="Variable (stack var or arg) name to retype.")
+    p_rt.add_argument("new_type", help='New C type, e.g. "int", "double", "Point *".')
+    _add_server_filter_args(p_rt)
+    _add_output_args(p_rt)
+    p_rt.set_defaults(func=cmd_retype)
+
+    # sync
+    p_sync = sub.add_parser(
+        "sync",
+        help=(
+            "Copy work on a function (name, return/arg types, stack vars, and "
+            "referenced user types) from one running server into another for "
+            "the same binary. Source = --from-id; destination = --id/--binary/--backend."
+        ),
+    )
+    p_sync.add_argument("target", help="Function name or address (hex/decimal) on the source.")
+    p_sync.add_argument(
+        "--from-id", dest="from_id", required=True,
+        help="Source server ID to copy work FROM (see `decompiler list`).",
+    )
+    _add_server_filter_args(p_sync)
+    _add_output_args(p_sync)
+    p_sync.set_defaults(func=cmd_sync)
 
     # list_strings
     p_ls = sub.add_parser(

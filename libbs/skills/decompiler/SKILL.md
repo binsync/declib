@@ -1,6 +1,6 @@
 ---
 name: decompiler
-description: Reverse-engineer and modify binaries with a single `decompiler` CLI that drives IDA Pro, Ghidra, Binary Ninja, or angr via LibBS. Use whenever the user asks to decompile, disassemble, look up cross references, rename functions or variables, search strings or functions, or otherwise inspect a binary file. Also use for multi-binary workflows (load several binaries at once and switch between them with --id).
+description: Reverse-engineer and modify binaries with a single `decompiler` CLI that drives IDA Pro, Ghidra, Binary Ninja, or angr via LibBS. Use whenever the user asks to decompile, disassemble, look up cross references, rename functions or variables, define or change types, sync work between decompilers, search strings or functions, or otherwise inspect a binary file. Also use for multi-binary workflows (load several binaries at once and switch between them with --id).
 ---
 
 # `decompiler` — LibBS CLI for LLMs
@@ -73,6 +73,8 @@ decompiler get_callers authenticate           # call-sites only (subset of xref_
 decompiler xref_from main                     # what does main call?
 decompiler rename func sub_400662 trampoline  # rename a function
 decompiler rename var v2 auth_result --function main  # rename a local
+decompiler create-type "struct Point { int x; int y; }"   # define a new type
+decompiler retype main buf "Point *"          # set a variable's type
 decompiler stop --all
 ```
 
@@ -135,6 +137,9 @@ same binary.
 | `xref_from <target>` | Functions that `target` calls. | same |
 | `rename func <target> <new>` | Rename a function. | same + `--json` |
 | `rename var <old> <new> --function <f>` | Rename a local variable inside a function. | same |
+| `create-type "<C definition>"` | Define a new `struct`/`enum`/`typedef` from a C string and add it to the type database. | same + `--json` |
+| `retype <func> <var> <type>` | Set the type of a function's local variable or argument. | same |
+| `sync <func> --from-id <src>` | Copy a function's work (names, return/arg types, stack-var names+types, referenced user types) from one running server into another for the same binary. | dest: `--id`/`--binary`/`--backend`; `--json` |
 | `list_strings` | Strings the decompiler found (may be incomplete — see below). | `--filter`, `--min-length N`, same |
 | `get_callers <target>` | Call-sites only — subset of `xref_to`. | same |
 | `read_memory <addr> <size>` | Read raw bytes from the binary at `<addr>`. Default output is a hexdump. | `--format {hexdump,hex,raw}`, same + `--json` (base64-encoded bytes) |
@@ -189,6 +194,38 @@ the address with `list_functions` / `xref_to`.
 
 Address formats follow the same rules as everywhere else: hex (`0x4008e0`),
 decimal (`4197088`), or lifted (`0x8e0`) all work.
+
+### Editing types and syncing across decompilers
+
+`create-type` parses a C type *definition* and adds it to the binary's type
+database. `retype` then points a variable at it (or at any built-in type).
+Both work on every backend; refer to the struct by name, with `*`/`[]` for
+pointers and arrays:
+
+```bash
+decompiler create-type "struct Point { int x; int y; }"
+decompiler create-type "enum Color { RED, GREEN=5, BLUE }"
+decompiler retype main buf "Point *"          # stack var or argument, by name
+```
+
+`sync` copies one function's work from a **source** server into a
+**destination** server for the *same* binary — handy when you reverse a
+function in one tool and want it mirrored in another. It transfers the
+function name, return/argument types, stack-variable names and types, and
+any user-defined types those reference. The source is chosen with
+`--from-id`; the destination with the usual `--id`/`--binary`/`--backend`:
+
+```bash
+decompiler load ./fauxware --backend ida      # id=ida123  (do your work here)
+decompiler load ./fauxware --backend ghidra   # id=ghi456
+decompiler rename func 0x71d auth_check --id ida123
+decompiler retype 0x71d buf "Point *" --id ida123
+decompiler sync 0x71d --from-id ida123 --id ghi456   # push it into Ghidra
+```
+
+Addresses and stack-variable offsets are normalized, so the function and
+its variables re-key correctly even when the two backends name them
+differently. Pass a function **address** (most robust) or a name.
 
 ### `list_strings` may be incomplete
 
