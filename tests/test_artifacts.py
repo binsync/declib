@@ -4,7 +4,7 @@ import json
 import unittest
 
 import toml
-from libbs.artifacts import (
+from declib.artifacts import (
     FunctionHeader, StackVariable, FunctionArgument, Function, ArtifactFormat, Struct, StructMember,
     load_many_artifacts, Artifact
 )

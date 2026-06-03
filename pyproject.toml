@@ -3,7 +3,7 @@ requires = ["setuptools>=61.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "libbs"
+name = "declib"
 classifiers = [
     "License :: OSI Approved :: BSD License",
     "Programming Language :: Python :: 3",
@@ -12,7 +12,7 @@ classifiers = [
 ]
 license = {text = "BSD 2 Clause"}
 description = "Your Only Decompiler API Lib - A generic API to script in and out of decompilers"
-urls = {Homepage = "https://github.com/binsync/libbs"}
+urls = {Homepage = "https://github.com/binsync/declib"}
 requires-python = ">= 3.10"
 dependencies = [
     "toml",
@@ -45,18 +45,18 @@ ghidra = [
 ]
 
 [project.scripts]
-libbs = "libbs.__main__:main"
-decompiler = "libbs.cli:main"
+declib = "declib.__main__:main"
+decompiler = "declib.cli:main"
 
 [tool.setuptools]
 include-package-data = true
 license-files = ["LICENSE"]
 
 [tool.setuptools.package-data]
-"libbs.skills" = ["**/SKILL.md", "**/*.md"]
+"declib.skills" = ["**/SKILL.md", "**/*.md"]
 
 [tool.setuptools.packages]
 find = {namespaces = false}
 
 [tool.setuptools.dynamic]
-version = {attr = "libbs.__version__"}
+version = {attr = "declib.__version__"}

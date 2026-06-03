@@ -7,10 +7,10 @@ import time
 import unittest
 from pathlib import Path
 
-from libbs.api.decompiler_server import DecompilerServer
-from libbs.api.decompiler_client import DecompilerClient
-from libbs.api.decompiler_interface import DecompilerInterface
-from libbs.decompilers import GHIDRA_DECOMPILER
+from declib.api.decompiler_server import DecompilerServer
+from declib.api.decompiler_client import DecompilerClient
+from declib.api.decompiler_interface import DecompilerInterface
+from declib.decompilers import GHIDRA_DECOMPILER
 
 # Test binary path - use the same path as other tests
 TEST_BINARIES_DIR = Path(os.getenv("TEST_BINARIES_DIR", Path(__file__).parent.parent.parent / "bs-artifacts" / "binaries"))
@@ -367,7 +367,7 @@ class TestClientServer(unittest.TestCase):
             # Manually recreate the socket file to simulate a stale socket
             # (normally stop() removes it, but crashes might leave it)
             import tempfile as tf
-            temp_dir = tf.mkdtemp(prefix="libbs_server_")
+            temp_dir = tf.mkdtemp(prefix="declib_server_")
             defunct_socket = os.path.join(temp_dir, "decompiler.sock")
             # Create an empty file to simulate stale socket
             open(defunct_socket, 'w').close()
@@ -468,7 +468,7 @@ class TestClientServer(unittest.TestCase):
                 })
 
             # Register callback for Comment artifacts
-            from libbs.artifacts import Comment
+            from declib.artifacts import Comment
             self.client.artifact_change_callbacks[Comment].append(test_callback)
 
             # Start artifact watchers (which starts event listener)
@@ -535,7 +535,7 @@ class TestClientServer(unittest.TestCase):
                 callback2_called.append(artifact)
 
             # Register multiple callbacks
-            from libbs.artifacts import Struct
+            from declib.artifacts import Struct
             self.client.artifact_change_callbacks[Struct].append(callback1)
             self.client.artifact_change_callbacks[Struct].append(callback2)
 
@@ -578,7 +578,7 @@ class TestClientServer(unittest.TestCase):
                 received_metadata.append(kwargs)
 
             # Register callback
-            from libbs.artifacts import Enum
+            from declib.artifacts import Enum
             self.client.artifact_change_callbacks[Enum].append(metadata_callback)
 
             # Start watchers
@@ -604,7 +604,7 @@ class TestClientServer(unittest.TestCase):
         Note: This test manually triggers callbacks on the server to test the event broadcast system,
         since Ghidra's artifact watchers don't function in headless mode.
         """
-        from libbs.artifacts import FunctionHeader, StackVariable, Struct, GlobalVariable, Enum, Comment
+        from declib.artifacts import FunctionHeader, StackVariable, Struct, GlobalVariable, Enum, Comment
         from collections import defaultdict
 
         with tempfile.TemporaryDirectory() as proj_dir:

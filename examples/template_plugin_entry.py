@@ -12,7 +12,7 @@ def create_plugin(*args, **kwargs):
     return _create_plugin(*args, **kwargs)
 
 # =============================================================================
-# LibBS generic plugin loader (don't touch things below this)
+# DecLib generic plugin loader (don't touch things below this)
 # =============================================================================
 
 import sys
@@ -21,7 +21,7 @@ import sys
 if sys.version[0] == "2":
     # Do Ghidra Py2 entry point
     import subprocess
-    from libbs_vendored.ghidra_bridge_server import GhidraBridgeServer
+    from declib_vendored.ghidra_bridge_server import GhidraBridgeServer
 
     GhidraBridgeServer.run_server(background=True)
     process = subprocess.Popen(plugin_command.split(" "))
@@ -46,7 +46,7 @@ else:
         create_plugin()
     elif has_angr:
         from angrmanagement.plugins import BasePlugin
-        class AngrBSPluginThunk(BasePlugin):
+        class AngrDLPluginThunk(BasePlugin):
             def __init__(self, workspace):
                 super().__init__(workspace)
                 globals()["workspace"] = workspace

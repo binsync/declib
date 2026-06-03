@@ -1,7 +1,7 @@
 # This example works with the binary found in ../tests/binaries/fauxware
 # To use this script, open that binary in a decompiler, than run this script.
-from libbs.api import DecompilerInterface
-from libbs.artifacts import Struct, StructMember
+from declib.api import DecompilerInterface
+from declib.artifacts import Struct, StructMember
 
 deci = DecompilerInterface.discover()
 # access a function and stack variable using their offsets, which get unified across decompilers

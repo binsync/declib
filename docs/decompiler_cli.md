@@ -1,13 +1,13 @@
 # `decompiler` CLI
 
-The `decompiler` command is a thin, LLM-friendly client over LibBS. You load a
+The `decompiler` command is a thin, LLM-friendly client over DecLib. You load a
 binary once (which spawns a headless decompiler server in the background) and
 then run quick inspection or mutation commands against it. Multiple binaries
 and backends can be loaded at the same time; each server is identified by a
 short ID.
 
 This document is for humans; the short reference version used by LLM agents
-lives at [`libbs/skills/decompiler/SKILL.md`](../libbs/skills/decompiler/SKILL.md)
+lives at [`declib/skills/decompiler/SKILL.md`](../declib/skills/decompiler/SKILL.md)
 and can be installed with `decompiler install-skill`.
 
 ---
@@ -43,16 +43,16 @@ and can be installed with `decompiler install-skill`.
 ## Install & setup
 
 ```bash
-pip install libbs
-# Register LibBS plugins into every detected decompiler.
-libbs --install
+pip install declib
+# Register DecLib plugins into every detected decompiler.
+declib --install
 # Or point the installer at one specific decompiler:
-libbs --single-decompiler-install binja "/Applications/Binary Ninja.app"
+declib --single-decompiler-install binja "/Applications/Binary Ninja.app"
 ```
 
-After `pip install libbs`, two entry points are available:
+After `pip install declib`, two entry points are available:
 
-- `libbs` — the existing management CLI (install plugins, run the server,
+- `declib` — the existing management CLI (install plugins, run the server,
   etc.)
 - `decompiler` — the new LLM-facing CLI documented here.
 
@@ -96,14 +96,14 @@ decompiler stop --all
 
 ```
 ┌─────────────┐      spawns       ┌─────────────────────────┐
-│  decompiler │ ────────────────▶ │ libbs --server (headless│
+│  decompiler │ ────────────────▶ │ declib --server (headless│
 │     CLI     │   (first load)    │ decompiler + AF_UNIX    │
 │             │                   │ socket)                 │
 │             │ ◀─────────────────│                         │
 └─────────────┘   every command   └─────────────────────────┘
         │
         ▼
-~/.local/state/libbs/servers/<id>.json  ← the shared registry
+~/.local/state/declib/servers/<id>.json  ← the shared registry
 ```
 
 Each running server writes a small JSON descriptor (`id`, `socket_path`,
@@ -143,7 +143,7 @@ decompiler load <binary> [--backend {angr,ghidra,binja,ida}]
 - **`--project-dir PATH`** — where to keep the backend's
   project/database files (Ghidra project, IDA `.id*`/`.til`, etc.).
   Default: a per-binary directory under the user cache
-  (`<platformdirs cache>/libbs/projects/<binary>-<hash>/`), so analysis
+  (`<platformdirs cache>/declib/projects/<binary>-<hash>/`), so analysis
   artifacts don't pollute the binary's directory. Pass `--project-dir ""`
   to disable the cache dir and let the backend drop files alongside the
   binary (legacy behavior).
@@ -166,7 +166,7 @@ ID           BACKEND  PID      BINARY
 3308b81cf8   angr     57613    /…/fauxware
 9d77ab8fd4   angr     57786    /…/posix_syscall
 
-(registry: /Users/me/Library/Application Support/libbs/servers)
+(registry: /Users/me/Library/Application Support/declib/servers)
 ```
 
 - **`--show-registry`** — print the registry directory and exit (useful for
@@ -437,7 +437,7 @@ decompiler list
 # abc1234...   angr     4213     .../my-binary
 # def5678...   angr     4217     .../my-binary-2
 #
-# (registry: /…/libbs/servers)
+# (registry: /…/declib/servers)
 
 # Target by ID …
 decompiler decompile main --id abc1234
@@ -469,7 +469,7 @@ decompiler decompile main --binary ./bin --backend angr
 
 ## Address formats
 
-LibBS normalizes addresses to a **lifted** form (relative to the binary's
+DecLib normalizes addresses to a **lifted** form (relative to the binary's
 base address), so artifacts stay stable across decompilers. The CLI, though,
 accepts whatever is natural for the user:
 
@@ -486,10 +486,10 @@ use. `addr_hex` is the same value as a hex string for convenience.
 ## Library-level API
 
 Everything the CLI does is also available as a library — useful when you
-want to chain operations or integrate LibBS into a larger tool:
+want to chain operations or integrate DecLib into a larger tool:
 
 ```python
-from libbs.api.decompiler_client import DecompilerClient
+from declib.api.decompiler_client import DecompilerClient
 
 # Pick a running server out of the shared registry.
 client = DecompilerClient.discover_from_registry(binary_path="./fauxware")
@@ -559,7 +559,7 @@ Spawned servers have their stdout/stderr sent to `/dev/null`. If you're
 debugging server startup, start one by hand in a foreground terminal:
 
 ```bash
-libbs --server --headless --decompiler angr --binary-path ./bin --server-id my-srv
+declib --server --headless --decompiler angr --binary-path ./bin --server-id my-srv
 ```
 
 That will print log output to the terminal, and the CLI in another terminal

@@ -1,9 +1,9 @@
 # Example BS Change Watcher Plugin
-The example plugin to show of LibBS for watching artifact changes.
+The example plugin to show of DecLib for watching artifact changes.
 
 ## Install 
 ```
-pip3 install -e . && python3 -m bs_change_watcher --install 
+pip3 install -e . && python3 -m dl_change_watcher --install 
 ```
 
 ## Usage 

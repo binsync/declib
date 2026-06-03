@@ -1,6 +1,6 @@
-# LibBS Examples
-This directory contains a series of example uses of LibBS in both plugins and as scripting library utilities.
-When used as a plugin, LibBS requires a bit more setup to both init the UI components and start the artifact 
+# DecLib Examples
+This directory contains a series of example uses of DecLib in both plugins and as scripting library utilities.
+When used as a plugin, DecLib requires a bit more setup to both init the UI components and start the artifact 
 watching backend. 
 
 ## Plugins

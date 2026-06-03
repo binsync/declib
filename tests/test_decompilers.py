@@ -8,10 +8,10 @@ from pathlib import Path
 from collections import defaultdict
 import os
 
-from libbs.api import DecompilerInterface
-from libbs.artifacts import FunctionHeader, StackVariable, Struct, GlobalVariable, Enum, Comment, ArtifactFormat, \
+from declib.api import DecompilerInterface
+from declib.artifacts import FunctionHeader, StackVariable, Struct, GlobalVariable, Enum, Comment, ArtifactFormat, \
     Decompilation, Function, StructMember, Typedef, Segment
-from libbs.decompilers import IDA_DECOMPILER, ANGR_DECOMPILER, BINJA_DECOMPILER, GHIDRA_DECOMPILER
+from declib.decompilers import IDA_DECOMPILER, ANGR_DECOMPILER, BINJA_DECOMPILER, GHIDRA_DECOMPILER
 
 GHIDRA_HEADLESS_PATH = Path(os.environ.get('GHIDRA_INSTALL_DIR', "")) / "support" / "analyzeHeadless"
 IDA_HEADLESS_PATH = Path(os.environ.get('IDA_HEADLESS_PATH', ""))

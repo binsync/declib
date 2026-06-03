@@ -1,5 +1,5 @@
 """
-Tests for the `decompiler` CLI and the new libbs core features it exposes
+Tests for the `decompiler` CLI and the new declib core features it exposes
 (list_strings, get_callers, disassemble, xref_to_addr, xref_from).
 
 The CLI tests are backend-parametrized: each test method lives on a single
@@ -19,9 +19,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from libbs.api import server_registry
-from libbs.api.decompiler_client import DecompilerClient
-from libbs.api.decompiler_interface import DecompilerInterface
+from declib.api import server_registry
+from declib.api.decompiler_client import DecompilerClient
+from declib.api.decompiler_interface import DecompilerInterface
 
 
 TEST_BINARIES_DIR = Path(
@@ -59,13 +59,13 @@ def _cli_env():
     env = os.environ.copy()
     # Isolate registry per-test so concurrent test runs don't collide and stale
     # servers from previous runs don't leak in.
-    env["LIBBS_SERVER_REGISTRY"] = _REGISTRY_DIR
+    env["DECLIB_SERVER_REGISTRY"] = _REGISTRY_DIR
     return env
 
 
 def _run_cli(*args, check=True, timeout=600, env_overrides=None) -> subprocess.CompletedProcess:
     """Run the `decompiler` CLI and return the result."""
-    cmd = [sys.executable, "-m", "libbs.cli.decompiler_cli", *args]
+    cmd = [sys.executable, "-m", "declib.cli.decompiler_cli", *args]
     env = _cli_env()
     for key, value in (env_overrides or {}).items():
         if value is None:
@@ -81,12 +81,12 @@ def _format_hex(value: int) -> str:
 
 
 # Shared registry directory for this module's tests
-_REGISTRY_DIR = tempfile.mkdtemp(prefix="libbs_cli_registry_")
+_REGISTRY_DIR = tempfile.mkdtemp(prefix="declib_cli_registry_")
 
 
 def _stop_all_servers():
     """Best-effort teardown: kill every server present in the registry."""
-    os.environ["LIBBS_SERVER_REGISTRY"] = _REGISTRY_DIR
+    os.environ["DECLIB_SERVER_REGISTRY"] = _REGISTRY_DIR
     try:
         records = server_registry.list_servers(prune_stale=False)
     except Exception:
@@ -134,7 +134,7 @@ class _CLIBackendTestBase(unittest.TestCase):
             raise unittest.SkipTest(f"Missing test binary: {FAUXWARE_PATH}")
         if not _backend_available(cls.backend):
             raise unittest.SkipTest(f"{cls.backend} backend not available")
-        os.environ["LIBBS_SERVER_REGISTRY"] = _REGISTRY_DIR
+        os.environ["DECLIB_SERVER_REGISTRY"] = _REGISTRY_DIR
         _stop_all_servers()
 
     @classmethod
@@ -396,11 +396,11 @@ class _CLIBackendTestBase(unittest.TestCase):
         """Load fauxware into a fresh, non-hidden project dir.
 
         Ghidra rejects project *locations* containing a dot-prefixed path
-        element (e.g. the default ``~/.cache/libbs/...``), so hand it a temp
+        element (e.g. the default ``~/.cache/declib/...``), so hand it a temp
         dir. This also keeps the test hermetic — no shared-cache state leaks
         in from prior (possibly interrupted) runs.
         """
-        proj = tempfile.mkdtemp(prefix="libbs_cli_proj_")
+        proj = tempfile.mkdtemp(prefix="declib_cli_proj_")
         self.addCleanup(shutil.rmtree, proj, ignore_errors=True)
         return self._load_fauxware(project_dir=proj)
 
@@ -657,7 +657,7 @@ class TestDecompilerSyncIDAtoGhidra(unittest.TestCase):
     def setUpClass(cls):
         if not FAUXWARE_PATH.exists():
             raise unittest.SkipTest(f"Missing test binary: {FAUXWARE_PATH}")
-        os.environ["LIBBS_SERVER_REGISTRY"] = _REGISTRY_DIR
+        os.environ["DECLIB_SERVER_REGISTRY"] = _REGISTRY_DIR
         _stop_all_servers()
 
     @classmethod
@@ -668,7 +668,7 @@ class TestDecompilerSyncIDAtoGhidra(unittest.TestCase):
         # Fresh, isolated project dir per test so a stale/locked backend
         # database from a previous (possibly interrupted) run can't make a
         # `load` hang or fail. Each backend writes into its own subdir.
-        self._proj_dir = tempfile.mkdtemp(prefix="libbs_sync_proj_")
+        self._proj_dir = tempfile.mkdtemp(prefix="declib_sync_proj_")
 
     def tearDown(self):
         _stop_all_servers()
@@ -797,7 +797,7 @@ class TestDecompilerSyncIDAtoGhidra(unittest.TestCase):
 
 class TestTypeDefinitionParser(unittest.TestCase):
     def test_struct_offsets_and_size(self):
-        from libbs.api.type_definition_parser import parse_type_definition
+        from declib.api.type_definition_parser import parse_type_definition
         s = parse_type_definition("struct Point { int x; int y; }")
         self.assertEqual(s.name, "Point")
         self.assertEqual(s.members[0].name, "x")
@@ -806,7 +806,7 @@ class TestTypeDefinitionParser(unittest.TestCase):
         self.assertEqual(s.size, 8)
 
     def test_struct_pointer_and_array_members(self):
-        from libbs.api.type_definition_parser import parse_type_definition
+        from declib.api.type_definition_parser import parse_type_definition
         s = parse_type_definition("struct S { char *name; int arr[4]; struct Foo *fp; }")
         types = {m.name: m.type for m in s.members.values()}
         self.assertEqual(types["name"], "char *")
@@ -814,18 +814,18 @@ class TestTypeDefinitionParser(unittest.TestCase):
         self.assertEqual(types["fp"], "struct Foo *")
 
     def test_enum(self):
-        from libbs.api.type_definition_parser import parse_type_definition
+        from declib.api.type_definition_parser import parse_type_definition
         e = parse_type_definition("enum Color { RED, GREEN=5, BLUE }")
         self.assertEqual(dict(e.members), {"RED": 0, "GREEN": 5, "BLUE": 6})
 
     def test_typedef(self):
-        from libbs.api.type_definition_parser import parse_type_definition
+        from declib.api.type_definition_parser import parse_type_definition
         t = parse_type_definition("typedef char *str_t")
         self.assertEqual(t.name, "str_t")
         self.assertEqual(t.type, "char *")
 
     def test_bad_input_raises(self):
-        from libbs.api.type_definition_parser import (
+        from declib.api.type_definition_parser import (
             parse_type_definition, TypeDefinitionParseError,
         )
         for bad in ["struct {", "not c @#", "", "struct Empty {}",
@@ -849,8 +849,8 @@ class TestArtifactWireSerialization(unittest.TestCase):
     """
 
     def test_decompilation_with_backslash_x_roundtrip_json(self):
-        from libbs.artifacts import Decompilation
-        from libbs.artifacts.formatting import ArtifactFormat
+        from declib.artifacts import Decompilation
+        from declib.artifacts.formatting import ArtifactFormat
 
         # Exactly the kind of text Ghidra emits when decompiling code that
         # compares a byte to a control character: `if (c == '\x01')`.
@@ -865,8 +865,8 @@ class TestArtifactWireSerialization(unittest.TestCase):
     def test_decompilation_toml_still_fails_on_backslash_x(self):
         """Document WHY we moved off TOML — if this ever starts working we
         can reconsider, but in the meantime it's load-bearing for the fix."""
-        from libbs.artifacts import Decompilation
-        from libbs.artifacts.formatting import ArtifactFormat
+        from declib.artifacts import Decompilation
+        from declib.artifacts.formatting import ArtifactFormat
         import toml
 
         text = "if (c == '\\x01') { return 42; }"
@@ -881,7 +881,7 @@ class TestCLIFormatters(unittest.TestCase):
 
     def test_format_addr_hex_handles_negative(self):
         """Regression for Ghidra surfacing negative-signed-long section addrs."""
-        from libbs.cli.decompiler_cli import _format_addr_hex
+        from declib.cli.decompiler_cli import _format_addr_hex
 
         # Positive values render as-is.
         self.assertEqual(_format_addr_hex(0x400), "0x400")
@@ -892,7 +892,7 @@ class TestCLIFormatters(unittest.TestCase):
         self.assertEqual(rendered, f"0x{((-0x100000) & ((1 << 64) - 1)):x}")
 
     def test_annotate_addrs_uses_safe_hex(self):
-        from libbs.cli.decompiler_cli import _annotate_addrs
+        from declib.cli.decompiler_cli import _annotate_addrs
 
         payload = {"addr": -0x100000, "target_addr": 0x1000}
         annotated = _annotate_addrs(payload)
@@ -908,7 +908,7 @@ class TestSkillInstaller(unittest.TestCase):
     """The bundled `decompiler` skill should ship with the package and install cleanly."""
 
     def test_bundled_skill_present(self):
-        from libbs import skills
+        from declib import skills
 
         names = skills.available_skills()
         self.assertIn("decompiler", names)
@@ -997,7 +997,7 @@ class TestSkillInstaller(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 @unittest.skipUnless(FAUXWARE_PATH.exists(), f"Missing test binary: {FAUXWARE_PATH}")
-class TestNewLibbsFeatures(unittest.TestCase):
+class TestNewDecLibFeatures(unittest.TestCase):
     """Direct tests for list_strings, get_callers, disassemble, xref_from, xref_to_addr."""
 
     @classmethod

@@ -5,18 +5,18 @@ from pathlib import Path
 
 import unittest
 
-from libbs.plugin_installer import LibBSPluginInstaller
+from declib.plugin_installer import DecLibPluginInstaller
 
 
 class TestCommandline(unittest.TestCase):
     def test_change_watcher_plugin_cli(self):
         # assumes you've pip installed ./examples/change_watcher_plugin
-        import bs_change_watcher
+        import dl_change_watcher
 
         # run the CLI version check
-        output = subprocess.run(["bs_change_watcher", "--version"], capture_output=True)
+        output = subprocess.run(["dl_change_watcher", "--version"], capture_output=True)
         version = output.stdout.decode().strip()
-        assert version == bs_change_watcher.__version__
+        assert version == dl_change_watcher.__version__
 
 
 class TestInstaller(unittest.TestCase):
@@ -25,7 +25,7 @@ class TestInstaller(unittest.TestCase):
     def test_install_ida_to_custom_path(self):
         """Test installing IDA plugin to a custom path."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            installer = LibBSPluginInstaller(targets=["ida"])
+            installer = DecLibPluginInstaller(targets=["ida"])
             result = installer.install(interactive=False, paths_by_target={"ida": tmpdir})
             # Verify the installer ran without error and returned the path
             assert "ida" in installer._successful_installs
@@ -34,7 +34,7 @@ class TestInstaller(unittest.TestCase):
     def test_install_binja_to_custom_path(self):
         """Test installing Binary Ninja plugin to a custom path."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            installer = LibBSPluginInstaller(targets=["binja"])
+            installer = DecLibPluginInstaller(targets=["binja"])
             result = installer.install(interactive=False, paths_by_target={"binja": tmpdir})
             # Verify the installer ran without error and returned the path
             assert "binja" in installer._successful_installs
@@ -43,7 +43,7 @@ class TestInstaller(unittest.TestCase):
     def test_install_ghidra_to_custom_path(self):
         """Test installing Ghidra plugin to a custom path."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            installer = LibBSPluginInstaller(targets=["ghidra"])
+            installer = DecLibPluginInstaller(targets=["ghidra"])
             result = installer.install(interactive=False, paths_by_target={"ghidra": tmpdir})
             # Verify the installer ran without error and returned the path
             assert "ghidra" in installer._successful_installs
@@ -52,7 +52,7 @@ class TestInstaller(unittest.TestCase):
     def test_install_angr_skipped_without_angrmanagement(self):
         """Test that angr install is skipped when angr-management is not installed."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            installer = LibBSPluginInstaller(targets=["angr"])
+            installer = DecLibPluginInstaller(targets=["angr"])
             # angr install requires angr-management to be installed, so it should be skipped
             # in test environments where angr-management is not available
             result = installer.install(interactive=False, paths_by_target={"angr": tmpdir})
@@ -70,7 +70,7 @@ class TestInstaller(unittest.TestCase):
             binja_path.mkdir()
             ghidra_path.mkdir()
 
-            installer = LibBSPluginInstaller(targets=["ida", "binja", "ghidra"])
+            installer = DecLibPluginInstaller(targets=["ida", "binja", "ghidra"])
             result = installer.install(
                 interactive=False,
                 paths_by_target={

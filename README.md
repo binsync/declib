@@ -1,15 +1,15 @@
-# LibBS
+# DecLib
 The decompiler API that works everywhere!
 
-LibBS is an abstracted decompiler API that enables you to write plugins/scripts that work, with minimal edit, 
-in every decompiler supported by LibBS. LibBS was originally designed to work with [BinSync](https://binsync.net), and is the backbone
+DecLib is an abstracted decompiler API that enables you to write plugins/scripts that work, with minimal edit, 
+in every decompiler supported by DecLib. DecLib was originally designed to work with [BinSync](https://binsync.net), and is the backbone
 for all BinSync based plugins.
 As an example, with the same script, you can [redefine the types of function variables with custom structs](./examples/struct_and_variable_use.py), all in less
 than 30 lines, in any supported decompilers.
 
 ## Install
 ```bash
-pip install libbs
+pip install declib
 ```
 
 The minimum Python version is **3.10**.
@@ -21,11 +21,11 @@ The minimum Python version is **3.10**.
 - Ghidra: **>= 12.0** (started in PyGhidra mode)
 
 ## Usage
-LibBS exposes all decompiler API through the abstract class `DecompilerInterface`. The `DecompilerInterface` 
+DecLib exposes all decompiler API through the abstract class `DecompilerInterface`. The `DecompilerInterface` 
 can be used in either the default mode, which assumes a GUI, or `headless` mode. In `headless` mode, the interface will 
 start a new process using a specified decompiler.
 
-You can find various examples using LibBS in the [examples](./examples) folder. Examples that are plugins show off
+You can find various examples using DecLib in the [examples](./examples) folder. Examples that are plugins show off
 more of the complicated API that allows you to use an abstracted UI, artifacts, and more.
 
 If you want a simplified command line interface (especially well-suited for LLMs), see the
@@ -36,7 +36,7 @@ To use the same script everywhere, use the convenience function `DecompilerInter
 auto find the correct interface. Copy the below code into any supported decompiler and it should run without edit.
 
 ```python
-from libbs.api import DecompilerInterface
+from declib.api import DecompilerInterface
 
 deci = DecompilerInterface.discover()
 for addr in deci.functions:
@@ -53,7 +53,7 @@ and running `./support/pyghidraRun`.
 To use headless mode you must specify a decompiler to use. You can get the traditional interface using the following:
 
 ```python 
-from libbs.api import DecompilerInterface
+from declib.api import DecompilerInterface
 
 deci = DecompilerInterface.discover(force_decompiler="ghidra", headless=True)
 ```
@@ -79,7 +79,7 @@ info. This also means using `keys`, `values`, or `list` on an artifact dictionar
 ### Serializing Artifacts
 All artifacts are serializable to the TOML and JSON formats. Serialization is done like so:
 ```python
-from libbs.artifacts import Function
+from declib.artifacts import Function
 import json
 
 my_func = Function(name="my_func", addr=0x4000, size=0x10)

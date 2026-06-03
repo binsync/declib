@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO)
 def example_with_local_decompiler():
     """Example using local DecompilerInterface"""
     try:
-        from libbs.api import DecompilerInterface
+        from declib.api import DecompilerInterface
         
         print("=== Using Local DecompilerInterface ===")
         deci = DecompilerInterface.discover()
@@ -34,7 +34,7 @@ def example_with_local_decompiler():
 def example_with_remote_decompiler(server_url: str = "rpyc://localhost:18861"):
     """Example using remote DecompilerClient"""
     try:
-        from libbs.api.decompiler_client import DecompilerClient
+        from declib.api.decompiler_client import DecompilerClient
         
         print(f"\n=== Using Remote DecompilerClient ({server_url}) ===")
         with DecompilerClient.discover(server_url=server_url) as deci:
@@ -42,7 +42,7 @@ def example_with_remote_decompiler(server_url: str = "rpyc://localhost:18861"):
             
     except Exception as e:
         print(f"Remote decompiler error: {e}")
-        print("Make sure to start the server first with: libbs --server")
+        print("Make sure to start the server first with: declib --server")
 
 
 def demo_decompiler_operations(deci):
@@ -145,28 +145,28 @@ def discover_decompiler(prefer_remote: bool = False, server_url: str = "rpyc://l
     if prefer_remote:
         # Try remote first
         try:
-            from libbs.api.decompiler_client import DecompilerClient
+            from declib.api.decompiler_client import DecompilerClient
             return DecompilerClient.discover(server_url=server_url)
         except Exception:
             pass
         
         # Fall back to local
         try:
-            from libbs.api import DecompilerInterface
+            from declib.api import DecompilerInterface
             return DecompilerInterface.discover()
         except Exception:
             return None
     else:
         # Try local first
         try:
-            from libbs.api import DecompilerInterface
+            from declib.api import DecompilerInterface
             return DecompilerInterface.discover()
         except Exception:
             pass
         
         # Fall back to remote
         try:
-            from libbs.api.decompiler_client import DecompilerClient
+            from declib.api.decompiler_client import DecompilerClient
             return DecompilerClient.discover(server_url=server_url)
         except Exception:
             return None
@@ -178,7 +178,7 @@ def main():
     else:
         server_url = "rpyc://localhost:18861"
     
-    print("LibBS DecompilerClient Example")
+    print("DecLib DecompilerClient Example")
     print("==============================")
     
     # Demo 1: Try local decompiler

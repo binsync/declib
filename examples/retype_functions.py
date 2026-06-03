@@ -1,4 +1,4 @@
-from libbs.api import DecompilerInterface
+from declib.api import DecompilerInterface
 
 deci = DecompilerInterface.discover()
 for addr, func in deci.functions.items():

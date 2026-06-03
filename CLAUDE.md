@@ -4,20 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-LibBS is a unified decompiler API that provides an abstracted interface for working with multiple decompilers (IDA Pro, Binary Ninja, Ghidra, angr-management). It enables writing plugins and scripts that work across all supported decompilers with minimal changes.
+DecLib is a unified decompiler API that provides an abstracted interface for working with multiple decompilers (IDA Pro, Binary Ninja, Ghidra, angr-management). It enables writing plugins and scripts that work across all supported decompilers with minimal changes.
 
 ## Development Commands
 
 ### Installation and Setup
 ```bash
-# Install libbs in development mode
+# Install declib in development mode
 pip install -e .
 
-# Install libbs plugins to decompilers (required after pip install)
-libbs --install
+# Install declib plugins to decompilers (required after pip install)
+declib --install
 
 # Install to specific decompiler
-libbs --single-decompiler-install ida /path/to/ida
+declib --single-decompiler-install ida /path/to/ida
 ```
 
 ### Testing
@@ -48,17 +48,17 @@ pip install -e ".[ghidra]"
 
 ### Core Components
 
-**DecompilerInterface** (`libbs/api/decompiler_interface.py`): The main abstraction layer that provides unified access to different decompilers. Can operate in GUI mode (default) or headless mode.
+**DecompilerInterface** (`declib/api/decompiler_interface.py`): The main abstraction layer that provides unified access to different decompilers. Can operate in GUI mode (default) or headless mode.
 
-**ArtifactLifter** (`libbs/api/artifact_lifter.py`): Handles conversion between decompiler-specific objects and LibBS artifacts.
+**ArtifactLifter** (`declib/api/artifact_lifter.py`): Handles conversion between decompiler-specific objects and DecLib artifacts.
 
-**Artifacts** (`libbs/artifacts/`): Unified data structures representing decompiler concepts:
+**Artifacts** (`declib/artifacts/`): Unified data structures representing decompiler concepts:
 - `Function`, `FunctionHeader`, `FunctionArgument`
 - `StackVariable`, `GlobalVariable` 
 - `Struct`, `StructMember`, `Enum`, `Typedef`
 - `Comment`, `Patch`, `Context`, `Decompilation`
 
-**Decompiler Implementations** (`libbs/decompilers/`):
+**Decompiler Implementations** (`declib/decompilers/`):
 - `ida/`: IDA Pro integration
 - `binja/`: Binary Ninja integration  
 - `ghidra/`: Ghidra integration (with bridge support)
@@ -66,9 +66,9 @@ pip install -e ".[ghidra]"
 
 ### Plugin System
 
-**Decompiler Stubs** (`libbs/decompiler_stubs/`): Plugin entry points for each decompiler that bootstrap LibBS functionality.
+**Decompiler Stubs** (`declib/decompiler_stubs/`): Plugin entry points for each decompiler that bootstrap DecLib functionality.
 
-**Plugin Installer** (`libbs/plugin_installer.py`): Automatically installs LibBS plugins to detected decompiler installations.
+**Plugin Installer** (`declib/plugin_installer.py`): Automatically installs DecLib plugins to detected decompiler installations.
 
 ### Key Design Patterns
 
@@ -81,10 +81,10 @@ pip install -e ".[ghidra]"
 ## Development Guidelines
 
 ### Adding New Decompiler Support
-1. Create new directory in `libbs/decompilers/`
+1. Create new directory in `declib/decompilers/`
 2. Implement `interface.py` inheriting from `DecompilerInterface`
 3. Implement `artifact_lifter.py` inheriting from `ArtifactLifter` 
-4. Add decompiler stub in `libbs/decompiler_stubs/`
+4. Add decompiler stub in `declib/decompiler_stubs/`
 5. Update `SUPPORTED_DECOMPILERS` constant
 
 ### Working with Artifacts
