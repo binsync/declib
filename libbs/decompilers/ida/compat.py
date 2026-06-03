@@ -143,8 +143,12 @@ def execute_ui(func):
 
 class DummyIDACodeView:
     """
-    TODO: this needs to be redone to support setting artifacts in the decompiler when in headless mode.
-        Mostly for decompiled artifacts, like stack variables and function arguments
+    A stand-in for an IDA pseudocode ``vdui`` used in headless mode (where no GUI
+    view exists). It exposes the two mutations ``set_stack_variables`` needs —
+    renaming and retyping a local/stack variable — implemented against the
+    headless Hexrays APIs (``rename_lvar`` / ``modify_user_lvar_info``) so that
+    edits actually persist to the database. Any other attribute access falls
+    back to a no-op (e.g. ``refresh_view`` has nothing to refresh headless).
     """
     def __init__(self, addr):
         self.cfunc = ida_hexrays.decompile(addr)
@@ -152,6 +156,34 @@ class DummyIDACodeView:
 
     def __getattr__(self, item):
         return lambda *x,**y: None
+
+    def rename_lvar(self, lvar, name, is_user=1) -> bool:
+        """Rename a local variable headlessly. Mirrors vdui.rename_lvar."""
+        ok = bool(ida_hexrays.rename_lvar(self.addr, lvar.name, name))
+        if ok:
+            self._refresh_cfunc()
+        return ok
+
+    def set_lvar_type(self, lvar, new_type) -> bool:
+        """Set a local variable's type headlessly. Mirrors vdui.set_lvar_type.
+
+        Uses ``modify_user_lvar_info`` with ``MLI_TYPE`` since there is no GUI
+        ``vdui`` to drive; the user-lvar settings persist across redecompilation.
+        """
+        info = ida_hexrays.lvar_saved_info_t()
+        info.ll.location = lvar.location
+        info.ll.defea = lvar.defea
+        info.type = new_type
+        ok = bool(ida_hexrays.modify_user_lvar_info(self.addr, ida_hexrays.MLI_TYPE, info))
+        if ok:
+            self._refresh_cfunc()
+        return ok
+
+    def _refresh_cfunc(self):
+        # Re-decompile so callers re-reading ``cfunc.lvars`` see the change.
+        new_cfunc = ida_hexrays.decompile(self.addr)
+        if new_cfunc is not None:
+            self.cfunc = new_cfunc
 
 
 def requires_decompilation(f):

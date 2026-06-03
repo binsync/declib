@@ -289,6 +289,14 @@ class Function(Artifact):
         # Let super set all attributes at once
         super().__setstate__(state)
 
+        # dec_obj is intentionally excluded from serialization (it's in
+        # _attr_ignore_set), so it is never present in `state`. Because Function
+        # uses __slots__, the attribute would otherwise be unset after a
+        # deserialization round-trip and any access to `func.dec_obj` (e.g. in
+        # get_dependencies or a backend's rename path) would raise AttributeError.
+        if not hasattr(self, "dec_obj"):
+            self.dec_obj = None
+
     def diff(self, other, **kwargs) -> Dict:
         diff_dict = {}
         if not isinstance(other, Function):

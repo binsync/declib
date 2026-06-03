@@ -383,6 +383,96 @@ class _CLIBackendTestBase(unittest.TestCase):
                 self.assertTrue(project_contents,
                                 f"{self.backend} wrote nothing to the project_dir")
 
+    # -------------------------------------------------------------------
+    # create-type / retype (run against every backend)
+    # -------------------------------------------------------------------
+
+    def _direct_client(self):
+        """Connect a DecompilerClient straight to this binary's server."""
+        record = server_registry.find_servers(binary_path=str(FAUXWARE_PATH))[0]
+        return DecompilerClient(socket_path=record["socket_path"])
+
+    def _load_fauxware_isolated(self):
+        """Load fauxware into a fresh, non-hidden project dir.
+
+        Ghidra rejects project *locations* containing a dot-prefixed path
+        element (e.g. the default ``~/.cache/libbs/...``), so hand it a temp
+        dir. This also keeps the test hermetic — no shared-cache state leaks
+        in from prior (possibly interrupted) runs.
+        """
+        proj = tempfile.mkdtemp(prefix="libbs_cli_proj_")
+        self.addCleanup(shutil.rmtree, proj, ignore_errors=True)
+        return self._load_fauxware(project_dir=proj)
+
+    def test_create_type(self):
+        self._load_fauxware_isolated()
+        result = _run_cli("create-type", "struct Point { int x; int y; }", "--json")
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["kind"], "Struct")
+        self.assertEqual(payload["name"], "Point")
+        self.assertTrue(payload["success"],
+                        f"{self.backend}: create-type failed: {payload}")
+
+        # Verify the struct actually landed, with both named members.
+        client = self._direct_client()
+        try:
+            struct = client.structs["Point"]
+        finally:
+            client.shutdown()
+        self.assertIsNotNone(struct, f"{self.backend}: Point not found after create")
+        member_names = {m.name for m in struct.members.values()}
+        self.assertEqual(member_names, {"x", "y"},
+                         f"{self.backend}: unexpected members {member_names}")
+
+    def test_retype(self):
+        self._load_fauxware_isolated()
+        # Pick a 4-byte scalar stack var (an int) and retype it to `float`.
+        # Same size + scalar->scalar keeps this clean across backends: no
+        # overlap with the adjacent slot and no array->scalar reshaping (which
+        # Ghidra handles poorly).
+        client = self._direct_client()
+        try:
+            addrs = [a for a, f in client.functions.items() if f.name == "main"]
+            main_addr = addrs[0]
+            main_func = client.functions[main_addr]
+            svars = list(main_func.stack_vars.values())
+            scalars = [v for v in svars
+                       if (v.size or 0) == 4 and "[" not in str(v.type or "")]
+            if not scalars:
+                self.skipTest(f"{self.backend}: no 4-byte scalar var in main to retype")
+            target = scalars[0].name
+            had_float_before = any("float" in str(v.type or "").lower() for v in svars)
+        finally:
+            client.shutdown()
+        self.assertFalse(had_float_before,
+                         f"{self.backend}: main already has a float var; bad fixture")
+
+        result = _run_cli("retype", "main", target, "float", "--json", check=False)
+        if result.returncode != 0:
+            self.skipTest(
+                f"{self.backend}: retype of {target!r} unsupported: "
+                f"{result.stdout + result.stderr}"
+            )
+        self.assertTrue(json.loads(result.stdout)["success"])
+
+        # Verify a float-typed variable now exists. Match on the type appearing
+        # in the set rather than by name/offset: backends rename a variable by
+        # its type when retyped (Ghidra local_2c -> fStack_2c).
+        client = self._direct_client()
+        try:
+            refreshed = client.functions[main_addr]
+            after_types = [str(v.type or "").lower() for v in refreshed.stack_vars.values()]
+        finally:
+            client.shutdown()
+        self.assertTrue(any("float" in t for t in after_types),
+                        f"{self.backend}: no float-typed var after retype; types={after_types}")
+
+    def test_retype_missing_var_exits_1(self):
+        self._load_fauxware_isolated()
+        result = _run_cli("retype", "main", "no_such_var_xyz", "int", check=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not found", (result.stdout + result.stderr).lower())
+
 
 class TestDecompilerCLIAngr(_CLIBackendTestBase):
     """angr backend: always available (pure-Python dependency)."""
@@ -548,6 +638,200 @@ class TestDecompilerCLIIDA(_CLIBackendTestBase):
     """
     backend = "ida"
     _persists_project_files = True  # .id0/.id1/.id2/.nam/.til
+
+
+# ---------------------------------------------------------------------------
+# Cross-decompiler sync: push edits made in IDA into a running Ghidra instance.
+# Standalone (not backend-parametrized) because it needs two specific backends.
+# ---------------------------------------------------------------------------
+
+@unittest.skipUnless(
+    _backend_available("ida") and _backend_available("ghidra"),
+    "sync IDA->Ghidra tests need both ida (idapro) and ghidra (GHIDRA_INSTALL_DIR)",
+)
+class TestDecompilerSyncIDAtoGhidra(unittest.TestCase):
+    """`decompiler sync` copies a function's work from a source server (IDA)
+    into a destination server (Ghidra) for the same binary."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not FAUXWARE_PATH.exists():
+            raise unittest.SkipTest(f"Missing test binary: {FAUXWARE_PATH}")
+        os.environ["LIBBS_SERVER_REGISTRY"] = _REGISTRY_DIR
+        _stop_all_servers()
+
+    @classmethod
+    def tearDownClass(cls):
+        _stop_all_servers()
+
+    def setUp(self):
+        # Fresh, isolated project dir per test so a stale/locked backend
+        # database from a previous (possibly interrupted) run can't make a
+        # `load` hang or fail. Each backend writes into its own subdir.
+        self._proj_dir = tempfile.mkdtemp(prefix="libbs_sync_proj_")
+
+    def tearDown(self):
+        _stop_all_servers()
+        shutil.rmtree(self._proj_dir, ignore_errors=True)
+
+    # -- helpers -----------------------------------------------------------
+
+    def _load(self, backend):
+        # `load` blocks until the server is ready (Ghidra analysis included).
+        out = _run_cli("load", str(FAUXWARE_PATH), "--backend", backend,
+                       "--force", "--project-dir", self._proj_dir, "--json").stdout
+        payload = json.loads(out)
+        self.assertIn(payload["status"], ("started", "already_loaded"))
+        return payload["id"]
+
+    def _client_for(self, server_id):
+        rec = server_registry.find_server(server_id=server_id)
+        self.assertIsNotNone(rec, f"no server record for id={server_id}")
+        return DecompilerClient(socket_path=rec["socket_path"])
+
+    def _main_addr(self, client):
+        addrs = [a for a, f in client.functions.items()
+                 if f.name in ("main", "_main")]
+        if not addrs:
+            addrs = [a for a in client.functions.keys() if a == 0x71d]
+        self.assertTrue(addrs, "could not find main on server")
+        return addrs[0]
+
+    # -- tests -------------------------------------------------------------
+
+    def test_sync_names_ida_to_ghidra(self):
+        ida_id = self._load("ida")
+        ghidra_id = self._load("ghidra")
+
+        # Pick a stack var on the IDA side to rename.
+        ida = self._client_for(ida_id)
+        try:
+            main_addr = self._main_addr(ida)
+            main_func = ida.functions[main_addr]
+            self.assertTrue(main_func.stack_vars, "IDA main has no stack vars")
+            target_off = sorted(main_func.stack_vars.keys())[0]
+            old_var_name = main_func.stack_vars[target_off].name
+        finally:
+            ida.shutdown()
+
+        # Edit in IDA via the CLI: rename the function and the stack var.
+        # Reference the function by address (stable) rather than by its new
+        # name, since the light function list can lag a header rename.
+        main_hex = _format_hex(main_addr)
+        r1 = _run_cli("rename", "func", main_hex, "synced_main", "--id", ida_id, "--json")
+        self.assertTrue(json.loads(r1.stdout)["success"])
+        r2 = _run_cli("rename", "var", old_var_name, "synced_var",
+                      "--function", main_hex, "--id", ida_id, "--json")
+        self.assertTrue(json.loads(r2.stdout)["success"])
+
+        # Sync IDA -> Ghidra (sync takes a function address).
+        rs = _run_cli("sync", main_hex, "--from-id", ida_id,
+                      "--id", ghidra_id, "--json")
+        sync_payload = json.loads(rs.stdout)
+        self.assertTrue(sync_payload["success"], f"sync failed: {sync_payload}")
+
+        # Verify on Ghidra. The function is keyed by addr (Ghidra still calls
+        # it "main"); the renamed var is matched by canonical stack offset.
+        ghidra = self._client_for(ghidra_id)
+        try:
+            gfunc = ghidra.functions[sync_payload["addr"]]
+            self.assertEqual(gfunc.name, "synced_main",
+                             f"function name not synced: {gfunc.name}")
+            var_names = {sv.name for sv in gfunc.stack_vars.values()}
+            self.assertIn("synced_var", var_names,
+                          f"variable name not synced; ghidra vars: {var_names}")
+        finally:
+            ghidra.shutdown()
+
+    def test_sync_types_ida_to_ghidra(self):
+        ida_id = self._load("ida")
+        ghidra_id = self._load("ghidra")
+
+        # Pick a stack var on IDA to retype. Use the largest so there's room
+        # for an 8-byte `Point *` without overlapping the adjacent slot.
+        ida = self._client_for(ida_id)
+        try:
+            main_addr = self._main_addr(ida)
+            main_func = ida.functions[main_addr]
+            self.assertTrue(main_func.stack_vars)
+            biggest = max(main_func.stack_vars.values(), key=lambda v: (v.size or 0))
+            target_off = biggest.offset
+            target_var_name = biggest.name
+        finally:
+            ida.shutdown()
+
+        # Feature 1 in IDA: create a struct, then retype a var to a Point pointer.
+        rc = _run_cli("create-type", "struct Point { int x; int y; }",
+                      "--id", ida_id, "--json")
+        self.assertEqual(rc.returncode, 0, rc.stderr)
+        self.assertTrue(json.loads(rc.stdout)["success"])
+        main_hex = _format_hex(main_addr)
+        rt = _run_cli("retype", main_hex, target_var_name, "Point *",
+                      "--id", ida_id, "--json")
+        self.assertEqual(rt.returncode, 0, rt.stderr)
+        self.assertTrue(json.loads(rt.stdout)["success"])
+
+        # Sync IDA -> Ghidra (sync takes a function address).
+        rs = _run_cli("sync", main_hex, "--from-id", ida_id, "--id", ghidra_id, "--json")
+        sync_payload = json.loads(rs.stdout)
+        self.assertTrue(sync_payload["success"], f"sync failed: {sync_payload}")
+
+        # Verify on Ghidra: the struct exists and the var references it.
+        ghidra = self._client_for(ghidra_id)
+        try:
+            self.assertIn("Point", ghidra.structs,
+                          f"Point not in ghidra structs: {list(ghidra.structs.keys())}")
+            gfunc = ghidra.functions[sync_payload["addr"]]
+            point_typed = [sv for sv in gfunc.stack_vars.values()
+                           if "Point" in str(sv.type or "")]
+            self.assertTrue(point_typed,
+                            "no ghidra var references Point: "
+                            f"{[(sv.name, sv.type) for sv in gfunc.stack_vars.values()]}")
+        finally:
+            ghidra.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Type-definition parser unit tests: backend-free, cheap to iterate on.
+# ---------------------------------------------------------------------------
+
+class TestTypeDefinitionParser(unittest.TestCase):
+    def test_struct_offsets_and_size(self):
+        from libbs.api.type_definition_parser import parse_type_definition
+        s = parse_type_definition("struct Point { int x; int y; }")
+        self.assertEqual(s.name, "Point")
+        self.assertEqual(s.members[0].name, "x")
+        self.assertEqual(s.members[0].size, 4)
+        self.assertEqual(s.members[4].name, "y")
+        self.assertEqual(s.size, 8)
+
+    def test_struct_pointer_and_array_members(self):
+        from libbs.api.type_definition_parser import parse_type_definition
+        s = parse_type_definition("struct S { char *name; int arr[4]; struct Foo *fp; }")
+        types = {m.name: m.type for m in s.members.values()}
+        self.assertEqual(types["name"], "char *")
+        self.assertEqual(types["arr"], "int [4]")
+        self.assertEqual(types["fp"], "struct Foo *")
+
+    def test_enum(self):
+        from libbs.api.type_definition_parser import parse_type_definition
+        e = parse_type_definition("enum Color { RED, GREEN=5, BLUE }")
+        self.assertEqual(dict(e.members), {"RED": 0, "GREEN": 5, "BLUE": 6})
+
+    def test_typedef(self):
+        from libbs.api.type_definition_parser import parse_type_definition
+        t = parse_type_definition("typedef char *str_t")
+        self.assertEqual(t.name, "str_t")
+        self.assertEqual(t.type, "char *")
+
+    def test_bad_input_raises(self):
+        from libbs.api.type_definition_parser import (
+            parse_type_definition, TypeDefinitionParseError,
+        )
+        for bad in ["struct {", "not c @#", "", "struct Empty {}",
+                    "struct A { int a; }; struct B { int b; };"]:
+            with self.assertRaises(TypeDefinitionParseError):
+                parse_type_definition(bad)
 
 
 # ---------------------------------------------------------------------------
