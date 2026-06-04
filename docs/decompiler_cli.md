@@ -6,6 +6,8 @@ then run quick inspection or mutation commands against it. Multiple binaries
 and backends can be loaded at the same time; each server is identified by a
 short ID.
 
+<img width="856" height="607" alt="image" src="https://github.com/user-attachments/assets/7da48494-5f56-4f6d-bad6-97a75d8038c5" />
+
 This document is for humans; the short reference version used by LLM agents
 lives at [`declib/skills/decompiler/SKILL.md`](../declib/skills/decompiler/SKILL.md)
 and can be installed with `decompiler install-skill`.
