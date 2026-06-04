@@ -28,8 +28,15 @@ start a new process using a specified decompiler.
 You can find various examples using DecLib in the [examples](./examples) folder. Examples that are plugins show off
 more of the complicated API that allows you to use an abstracted UI, artifacts, and more.
 
+### Agent CLI
+
 If you want a simplified command line interface (especially well-suited for LLMs), see the
-[`decompiler` CLI guide](./docs/decompiler_cli.md).
+[decompiler CLI guide](./docs/decompiler_cli.md).
+
+```
+decompiler load /path/to/binary --backend ida
+decompiler decompile main --id 1234
+```
 
 ### UI Mode (default)
 To use the same script everywhere, use the convenience function `DecompilerInterface.discover_interface()`, which will
