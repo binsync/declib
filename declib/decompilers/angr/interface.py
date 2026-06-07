@@ -847,7 +847,13 @@ class AngrInterface(DecompilerInterface):
 
     @staticmethod
     def line_map_from_decompilation(dec):
-        import ailment
+        try:
+            # angr >= 9.2.2xx vendors ailment; the standalone `ailment` package
+            # is a different module whose Label class fails isinstance checks
+            # against statements produced by modern angr.
+            from angr import ailment
+        except ImportError:
+            import ailment
         from angr.analyses.decompiler.structured_codegen.c import CStructuredCodeWalker, CFunctionCall, CIfElse, CIfBreak
 
         if dec is None or dec.codegen is None:
@@ -874,7 +880,11 @@ class AngrInterface(DecompilerInterface):
             except Exception:
                 continue
 
-            ail_block_stmts = [stmt for stmt in ail_block.statements if not isinstance(stmt, ailment.statement.Label)]
+            ail_block_stmts = [
+                stmt for stmt in ail_block.statements
+                if not isinstance(stmt, ailment.statement.Label)
+                and getattr(stmt, "ins_addr", None) is not None
+            ]
             if not ail_block_stmts:
                 continue
 
