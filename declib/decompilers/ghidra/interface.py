@@ -843,25 +843,54 @@ class GhidraDecompilerInterface(DecompilerInterface):
         return comments.get(addr, None)
 
     def _comments(self) -> Dict[int, Comment]:
+        from .compat.imports import CodeUnit
+
+        # Ghidra stores up to five distinct comment types per code unit, but the declib Comment
+        # model holds a single string per address. The previous implementation only read EOL and
+        # PRE comments and let PRE silently clobber EOL at the same address; it also never read
+        # PLATE comments, so function-level comments written by _set_comment could not be read
+        # back. We now capture every populated type and join them in display order so no comment
+        # text is dropped. A PLATE comment on a function's entry instruction is the function-level
+        # comment, so it is tagged with func_addr to round-trip through _set_comment as a PLATE.
+        ordered_types = (
+            CodeUnit.PLATE_COMMENT,
+            CodeUnit.PRE_COMMENT,
+            CodeUnit.EOL_COMMENT,
+            CodeUnit.POST_COMMENT,
+            CodeUnit.REPEATABLE_COMMENT,
+        )
+        decompiled_types = {CodeUnit.PLATE_COMMENT, CodeUnit.PRE_COMMENT}
+
         comments = {}
-        funcs_code_units = self.__function_code_units()
-        for code_units in funcs_code_units:
-            for code_unit in code_units:
-                # TODO: this could be bad if we have multiple comments at the same address (pre and eol)
-                # eol comment
-                eol_cmt = code_unit.getComment(0)
-                if eol_cmt:
-                    addr = int(code_unit.getAddress().getOffset())
-                    comments[addr] = Comment(
-                        addr=addr, comment=str(eol_cmt)
-                    )
-                # pre comment
-                pre_cmt = code_unit.getComment(1)
-                if pre_cmt:
-                    addr = int(code_unit.getAddress().getOffset())
-                    comments[addr] = Comment(
-                        addr=addr, comment=str(pre_cmt), decompiled=True
-                    )
+        listing = self.currentProgram.getListing()
+        for func in self.currentProgram.getFunctionManager().getFunctions(True):
+            func_addr = int(func.getEntryPoint().getOffset())
+            for code_unit in listing.getCodeUnits(func.getBody(), True):
+                parts = []
+                decompiled = False
+                has_plate = False
+                for cmt_type in ordered_types:
+                    text = code_unit.getComment(cmt_type)
+                    if not text:
+                        continue
+                    parts.append(str(text))
+                    decompiled |= cmt_type in decompiled_types
+                    has_plate |= cmt_type == CodeUnit.PLATE_COMMENT
+
+                if not parts:
+                    continue
+
+                addr = int(code_unit.getAddress().getOffset())
+                # Only a PLATE comment sitting on the entry instruction is the function-level
+                # comment; tagging func_addr makes _set_comment re-apply it as a PLATE. Other
+                # comments at the entry must keep func_addr=None so they are not promoted to PLATE.
+                comment_func_addr = func_addr if (has_plate and addr == func_addr) else None
+                comments[addr] = Comment(
+                    addr=addr,
+                    func_addr=comment_func_addr,
+                    comment="\n".join(parts),
+                    decompiled=decompiled,
+                )
 
         return comments
 
@@ -1424,14 +1453,4 @@ class GhidraDecompilerInterface(DecompilerInterface):
             (typedef.getPathName(), typedef)
             for typedef in self.currentProgram.getDataTypeManager().getAllDataTypes()
             if isinstance(typedef, TypedefDB)
-        ]
-
-
-    def __function_code_units(self):
-        """
-        Returns a list of code units for each function in the program.
-        """
-        return [
-            [code_unit for code_unit in self.currentProgram.getListing().getCodeUnits(func.getBody(), True)]
-            for func in self.currentProgram.getFunctionManager().getFunctions(True)
         ]
