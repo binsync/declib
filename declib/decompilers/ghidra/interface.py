@@ -845,51 +845,43 @@ class GhidraDecompilerInterface(DecompilerInterface):
     def _comments(self) -> Dict[int, Comment]:
         from .compat.imports import CodeUnit
 
-        # Ghidra stores up to five distinct comment types per code unit, but the declib Comment
-        # model holds a single string per address. The previous implementation only read EOL and
-        # PRE comments and let PRE silently clobber EOL at the same address; it also never read
-        # PLATE comments, so function-level comments written by _set_comment could not be read
-        # back. We now capture every populated type and join them in display order so no comment
-        # text is dropped. A PLATE comment on a function's entry instruction is the function-level
-        # comment, so it is tagged with func_addr to round-trip through _set_comment as a PLATE.
+        # Ghidra stores multiple comment slots per code unit, while declib has one
+        # portable Comment per address. Preserve all populated text and label the
+        # slots when more than one has to collapse into the same Comment.
         ordered_types = (
-            CodeUnit.PLATE_COMMENT,
-            CodeUnit.PRE_COMMENT,
-            CodeUnit.EOL_COMMENT,
-            CodeUnit.POST_COMMENT,
-            CodeUnit.REPEATABLE_COMMENT,
+            (CodeUnit.PLATE_COMMENT, "PLATE", False),
+            (CodeUnit.PRE_COMMENT, "PRE", True),
+            (CodeUnit.EOL_COMMENT, "EOL", False),
+            (CodeUnit.POST_COMMENT, "POST", False),
+            (CodeUnit.REPEATABLE_COMMENT, "REPEATABLE", False),
         )
-        decompiled_types = {CodeUnit.PLATE_COMMENT, CodeUnit.PRE_COMMENT}
 
         comments = {}
         listing = self.currentProgram.getListing()
         for func in self.currentProgram.getFunctionManager().getFunctions(True):
-            func_addr = int(func.getEntryPoint().getOffset())
             for code_unit in listing.getCodeUnits(func.getBody(), True):
-                parts = []
-                decompiled = False
-                has_plate = False
-                for cmt_type in ordered_types:
+                comment_entries = []
+                for cmt_type, label, is_decompiled_type in ordered_types:
                     text = code_unit.getComment(cmt_type)
                     if not text:
                         continue
-                    parts.append(str(text))
-                    decompiled |= cmt_type in decompiled_types
-                    has_plate |= cmt_type == CodeUnit.PLATE_COMMENT
+                    comment_entries.append((label, str(text), is_decompiled_type))
 
-                if not parts:
+                if not comment_entries:
                     continue
 
+                should_prefix = len(comment_entries) > 1
+                parts = [
+                    f"[{label}] {text}" if should_prefix else text
+                    for label, text, _ in comment_entries
+                ]
+                has_decompiled = any(is_decompiled for _, _, is_decompiled in comment_entries)
+                has_disassembly = any(not is_decompiled for _, _, is_decompiled in comment_entries)
                 addr = int(code_unit.getAddress().getOffset())
-                # Only a PLATE comment sitting on the entry instruction is the function-level
-                # comment; tagging func_addr makes _set_comment re-apply it as a PLATE. Other
-                # comments at the entry must keep func_addr=None so they are not promoted to PLATE.
-                comment_func_addr = func_addr if (has_plate and addr == func_addr) else None
                 comments[addr] = Comment(
                     addr=addr,
-                    func_addr=comment_func_addr,
                     comment="\n".join(parts),
-                    decompiled=decompiled,
+                    decompiled=has_decompiled and not has_disassembly,
                 )
 
         return comments
