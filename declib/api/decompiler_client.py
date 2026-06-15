@@ -792,14 +792,14 @@ class DecompilerClient:
         _l.info("DecompilerClient shut down complete")
 
     def shutdown_server(self) -> None:
-        """Ask the server to tear down its decompiler interface, then disconnect.
+        """Ask the server to stop, then disconnect.
 
         Used by CLI commands like ``decompiler stop``. Regular usage should
         prefer :meth:`shutdown`, which leaves the server running.
         """
         if self._socket:
             try:
-                self._send_request({"type": "shutdown_deci"})
+                self._send_request({"type": "shutdown_server"})
             except Exception:
                 pass
         self.shutdown()
