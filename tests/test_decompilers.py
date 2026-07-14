@@ -104,6 +104,76 @@ class TestHeadlessInterfaces(unittest.TestCase):
                             self.assertIs(deci.requires_main_thread_dispatch, expected)
                             self.assertIs(server.requires_main_thread, expected)
 
+    def test_ghidra_comment_slots(self):
+        class CodeUnit:
+            EOL_COMMENT = 0
+            PRE_COMMENT = 1
+            POST_COMMENT = 2
+            PLATE_COMMENT = 3
+            REPEATABLE_COMMENT = 4
+
+        pyghidra = types.ModuleType("pyghidra")
+        pyghidra_core = types.ModuleType("pyghidra.core")
+        pyghidra_core._analyze_program = MagicMock()
+        pyghidra_core._get_language = MagicMock()
+        pyghidra_core._get_compiler_spec = MagicMock()
+        jpype = types.ModuleType("jpype")
+        jpype.JClass = type
+        compat_imports = types.ModuleType("declib.decompilers.ghidra.compat.imports")
+        compat_imports.CodeUnit = CodeUnit
+
+        cases = (
+            ({CodeUnit.PRE_COMMENT: "pre"}, "pre", True),
+            ({CodeUnit.EOL_COMMENT: "eol"}, "eol", False),
+            (
+                {CodeUnit.PRE_COMMENT: "pre", CodeUnit.EOL_COMMENT: "eol"},
+                "[PRE] pre\n[EOL] eol",
+                False,
+            ),
+            (
+                {
+                    CodeUnit.PLATE_COMMENT: "plate",
+                    CodeUnit.EOL_COMMENT: "eol",
+                    CodeUnit.POST_COMMENT: "post",
+                    CodeUnit.REPEATABLE_COMMENT: "repeatable",
+                },
+                "[PLATE] plate\n[EOL] eol\n[POST] post\n[REPEATABLE] repeatable",
+                False,
+            ),
+        )
+
+        modules = {
+            "pyghidra": pyghidra,
+            "pyghidra.core": pyghidra_core,
+            "jpype": jpype,
+            "declib.decompilers.ghidra.compat.imports": compat_imports,
+        }
+        with patch.dict(sys.modules, modules):
+            sys.modules.pop("declib.decompilers.ghidra.interface", None)
+            from declib.decompilers.ghidra.interface import GhidraDecompilerInterface
+
+            class TestableGhidraDecompilerInterface(GhidraDecompilerInterface):
+                @property
+                def currentProgram(self):
+                    return self._program_for_test
+
+            for slot_comments, expected_text, expected_decompiled in cases:
+                with self.subTest(slots=tuple(slot_comments)):
+                    code_unit = MagicMock()
+                    code_unit.getComment.side_effect = slot_comments.get
+                    code_unit.getAddress.return_value.getOffset.return_value = 0x401000
+
+                    program = MagicMock()
+                    program.getFunctionManager.return_value.getFunctions.return_value = [MagicMock()]
+                    program.getListing.return_value.getCodeUnits.return_value = [code_unit]
+
+                    deci = object.__new__(TestableGhidraDecompilerInterface)
+                    deci._program_for_test = program
+                    comment = deci._comments()[0x401000]
+
+                    self.assertEqual(comment.comment, expected_text)
+                    self.assertEqual(comment.decompiled, expected_decompiled)
+
     def test_readme_example(self):
         # TODO: add angr
         for dec_name in [IDA_DECOMPILER, GHIDRA_DECOMPILER, BINJA_DECOMPILER]:
