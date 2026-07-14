@@ -111,7 +111,7 @@ class PluginInstaller:
         - Path: install succeeded
         """
 
-        PluginInstaller.info(f"Install for {target}? [y/n]")
+        PluginInstaller.info(f"Install for {target}? [y/N]")
         res = prompt("")
         if res.lower() != "y":
             return None
