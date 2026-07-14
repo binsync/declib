@@ -74,6 +74,9 @@ class TestHeadlessInterfaces(unittest.TestCase):
                 binary_path=TEST_BINARIES_DIR / "posix_syscall",
             )
             self.deci = deci
+            if dec_name == GHIDRA_DECOMPILER:
+                self.assertTrue(type(deci).requires_main_thread_dispatch)
+                self.assertFalse(deci.requires_main_thread_dispatch)
             changed_addrs = set()
             # set it
             for addr in deci.functions:
