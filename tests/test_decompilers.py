@@ -1,14 +1,18 @@
 import json
 import logging
 import subprocess
+import sys
 import tempfile
 import time
+import types
 import unittest
+from unittest.mock import MagicMock, patch
 from pathlib import Path
 from collections import defaultdict
 import os
 
 from declib.api import DecompilerInterface
+from declib.api.decompiler_server import DecompilerServer
 from declib.artifacts import FunctionHeader, StackVariable, Struct, GlobalVariable, Enum, Comment, ArtifactFormat, \
     Decompilation, Function, StructMember, Typedef, Segment
 from declib.decompilers import IDA_DECOMPILER, ANGR_DECOMPILER, BINJA_DECOMPILER, GHIDRA_DECOMPILER
@@ -64,6 +68,41 @@ class TestHeadlessInterfaces(unittest.TestCase):
     def tearDown(self):
         if self.deci is not None:
             self.deci.shutdown()
+
+    def test_ghidra_server_dispatch_requirement(self):
+        import declib.decompilers.ghidra as ghidra_package
+
+        pyghidra = types.ModuleType("pyghidra")
+        pyghidra_core = types.ModuleType("pyghidra.core")
+        pyghidra_core._analyze_program = MagicMock()
+        pyghidra_core._get_language = MagicMock()
+        pyghidra_core._get_compiler_spec = MagicMock()
+        jpype = types.ModuleType("jpype")
+        jpype.JClass = type
+
+        modules = {
+            "pyghidra": pyghidra,
+            "pyghidra.core": pyghidra_core,
+            "jpype": jpype,
+        }
+        with patch.object(ghidra_package, "interface", create=True):
+            with patch.dict(sys.modules, modules):
+                sys.modules.pop("declib.decompilers.ghidra.interface", None)
+                from declib.decompilers.ghidra.interface import GhidraDecompilerInterface
+
+                with patch.object(GhidraDecompilerInterface, "_init_gui_components"), \
+                        patch.object(GhidraDecompilerInterface, "_init_headless_components"):
+                    for headless, expected in ((True, False), (False, True)):
+                        with self.subTest(headless=headless):
+                            deci = GhidraDecompilerInterface(
+                                headless=headless,
+                                config=MagicMock(),
+                            )
+                            server = object.__new__(DecompilerServer)
+                            server.deci = deci
+
+                            self.assertIs(deci.requires_main_thread_dispatch, expected)
+                            self.assertIs(server.requires_main_thread, expected)
 
     def test_readme_example(self):
         # TODO: add angr

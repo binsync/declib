@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+from types import MethodType
 from pathlib import Path
 
 from declib.api.decompiler_server import DecompilerServer
@@ -217,6 +218,27 @@ class TestClientServer(unittest.TestCase):
             # Test KeyError handling for non-existent function
             with self.assertRaises(KeyError, msg="Should raise KeyError for non-existent function"):
                 self.client.functions[0xDEADBEEF]  # Non-existent function
+
+    def test_shutdown_server_requests_server_stop(self):
+        """Test that shutdown_server asks the remote server loop to stop."""
+        sent_requests = []
+        client = object.__new__(DecompilerClient)
+        client._socket = object()
+        client._event_listener_running = False
+
+        def fake_send_request(self, request):
+            sent_requests.append(request)
+
+        def fake_shutdown(self):
+            sent_requests.append({"type": "client_shutdown"})
+
+        client._send_request = MethodType(fake_send_request, client)
+        client.shutdown = MethodType(fake_shutdown, client)
+
+        client.shutdown_server()
+
+        self.assertEqual(sent_requests[0], {"type": "shutdown_server"})
+        self.assertEqual(sent_requests[1], {"type": "client_shutdown"})
     
     def test_client_context_manager(self):
         """Test client context manager functionality"""

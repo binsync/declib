@@ -34,6 +34,10 @@ _l = logging.getLogger(__name__)
 
 class GhidraDecompilerInterface(DecompilerInterface):
     CACHE_TIMEOUT = 5
+    # GUI-backed Ghidra program APIs are not safe to enter concurrently from
+    # arbitrary socket worker threads. DecompilerServer routes calls through
+    # its main-thread dispatcher when this is enabled.
+    requires_main_thread_dispatch = True
     _program: Optional["Program"]
     flat_api: "FlatProgramAPI"
 
@@ -76,6 +80,7 @@ class GhidraDecompilerInterface(DecompilerInterface):
         # main thread queue
         self._main_thread_queue = queue.Queue()
         self._results_queue = queue.Queue()
+        self.requires_main_thread_dispatch = not kwargs.get("headless", False)
 
         super().__init__(
             name="ghidra",
@@ -1430,4 +1435,3 @@ class GhidraDecompilerInterface(DecompilerInterface):
             [code_unit for code_unit in self.currentProgram.getListing().getCodeUnits(func.getBody(), True)]
             for func in self.currentProgram.getFunctionManager().getFunctions(True)
         ]
-
