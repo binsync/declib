@@ -10,7 +10,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.12",
 ]
-license = "BSD-2-Clause"
+license = {text = "BSD 2 Clause"}
 description = "Your Only Decompiler API Lib - A generic API to script in and out of decompilers"
 urls = {Homepage = "https://github.com/binsync/declib"}
 requires-python = ">= 3.10"
