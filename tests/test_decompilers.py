@@ -112,6 +112,10 @@ class TestHeadlessInterfaces(unittest.TestCase):
             PLATE_COMMENT = 3
             REPEATABLE_COMMENT = 4
 
+        class JavaComment:
+            def __str__(self):
+                return "post"
+
         pyghidra = types.ModuleType("pyghidra")
         pyghidra_core = types.ModuleType("pyghidra.core")
         pyghidra_core._analyze_program = MagicMock()
@@ -123,21 +127,28 @@ class TestHeadlessInterfaces(unittest.TestCase):
         compat_imports.CodeUnit = CodeUnit
 
         cases = (
-            ({CodeUnit.PRE_COMMENT: "pre"}, "pre", True),
-            ({CodeUnit.EOL_COMMENT: "eol"}, "eol", False),
+            ("empty", {}, None, None),
+            ("plate", {CodeUnit.PLATE_COMMENT: "plate"}, "plate", False),
+            ("pre", {CodeUnit.PRE_COMMENT: "pre"}, "pre", True),
+            ("eol", {CodeUnit.EOL_COMMENT: "eol"}, "eol", False),
+            ("post", {CodeUnit.POST_COMMENT: JavaComment()}, "post", False),
+            ("repeatable", {CodeUnit.REPEATABLE_COMMENT: "repeatable"}, "repeatable", False),
             (
-                {CodeUnit.PRE_COMMENT: "pre", CodeUnit.EOL_COMMENT: "eol"},
-                "[PRE] pre\n[EOL] eol",
+                "plate-and-pre",
+                {CodeUnit.PLATE_COMMENT: "plate", CodeUnit.PRE_COMMENT: "pre"},
+                "[PLATE] plate\n[PRE] pre",
                 False,
             ),
             (
+                "all-slots",
                 {
                     CodeUnit.PLATE_COMMENT: "plate",
+                    CodeUnit.PRE_COMMENT: "pre",
                     CodeUnit.EOL_COMMENT: "eol",
                     CodeUnit.POST_COMMENT: "post",
                     CodeUnit.REPEATABLE_COMMENT: "repeatable",
                 },
-                "[PLATE] plate\n[EOL] eol\n[POST] post\n[REPEATABLE] repeatable",
+                "[PLATE] plate\n[PRE] pre\n[EOL] eol\n[POST] post\n[REPEATABLE] repeatable",
                 False,
             ),
         )
@@ -157,22 +168,46 @@ class TestHeadlessInterfaces(unittest.TestCase):
                 def currentProgram(self):
                     return self._program_for_test
 
-            for slot_comments, expected_text, expected_decompiled in cases:
-                with self.subTest(slots=tuple(slot_comments)):
-                    code_unit = MagicMock()
-                    code_unit.getComment.side_effect = slot_comments.get
-                    code_unit.getAddress.return_value.getOffset.return_value = 0x401000
+            code_units = []
+            for index, (_, slot_comments, _, _) in enumerate(cases):
+                code_unit = MagicMock()
+                code_unit.getComment.side_effect = slot_comments.get
+                code_unit.getAddress.return_value.getOffset.return_value = 0x401000 + index * 0x10
+                code_units.append(code_unit)
 
-                    program = MagicMock()
-                    program.getFunctionManager.return_value.getFunctions.return_value = [MagicMock()]
-                    program.getListing.return_value.getCodeUnits.return_value = [code_unit]
+            body = object()
+            func = MagicMock()
+            func.getBody.return_value = body
+            program = MagicMock()
+            program.getFunctionManager.return_value.getFunctions.return_value = [func]
+            program.getListing.return_value.getCodeUnits.return_value = code_units
 
-                    deci = object.__new__(TestableGhidraDecompilerInterface)
-                    deci._program_for_test = program
-                    comment = deci._comments()[0x401000]
+            deci = object.__new__(TestableGhidraDecompilerInterface)
+            deci._program_for_test = program
+            comments = deci._comments()
 
+            expected_addresses = {
+                0x401000 + index * 0x10
+                for index, (_, _, expected_text, _) in enumerate(cases)
+                if expected_text is not None
+            }
+            self.assertEqual(set(comments), expected_addresses)
+            for index, (name, _, expected_text, expected_decompiled) in enumerate(cases):
+                with self.subTest(case=name):
+                    addr = 0x401000 + index * 0x10
+                    if expected_text is None:
+                        self.assertNotIn(addr, comments)
+                        continue
+
+                    comment = comments[addr]
+                    self.assertEqual(comment.addr, addr)
+                    self.assertIsNone(comment.func_addr)
                     self.assertEqual(comment.comment, expected_text)
                     self.assertEqual(comment.decompiled, expected_decompiled)
+
+            program.getFunctionManager.return_value.getFunctions.assert_called_once_with(True)
+            func.getBody.assert_called_once_with()
+            program.getListing.return_value.getCodeUnits.assert_called_once_with(body, True)
 
     def test_readme_example(self):
         # TODO: add angr
