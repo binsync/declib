@@ -843,25 +843,46 @@ class GhidraDecompilerInterface(DecompilerInterface):
         return comments.get(addr, None)
 
     def _comments(self) -> Dict[int, Comment]:
+        from .compat.imports import CodeUnit
+
+        # Ghidra stores multiple comment slots per code unit, while declib has one
+        # portable Comment per address. Preserve all populated text and label the
+        # slots when more than one has to collapse into the same Comment.
+        ordered_types = (
+            (CodeUnit.PLATE_COMMENT, "PLATE", False),
+            (CodeUnit.PRE_COMMENT, "PRE", True),
+            (CodeUnit.EOL_COMMENT, "EOL", False),
+            (CodeUnit.POST_COMMENT, "POST", False),
+            (CodeUnit.REPEATABLE_COMMENT, "REPEATABLE", False),
+        )
+
         comments = {}
-        funcs_code_units = self.__function_code_units()
-        for code_units in funcs_code_units:
-            for code_unit in code_units:
-                # TODO: this could be bad if we have multiple comments at the same address (pre and eol)
-                # eol comment
-                eol_cmt = code_unit.getComment(0)
-                if eol_cmt:
-                    addr = int(code_unit.getAddress().getOffset())
-                    comments[addr] = Comment(
-                        addr=addr, comment=str(eol_cmt)
-                    )
-                # pre comment
-                pre_cmt = code_unit.getComment(1)
-                if pre_cmt:
-                    addr = int(code_unit.getAddress().getOffset())
-                    comments[addr] = Comment(
-                        addr=addr, comment=str(pre_cmt), decompiled=True
-                    )
+        listing = self.currentProgram.getListing()
+        for func in self.currentProgram.getFunctionManager().getFunctions(True):
+            for code_unit in listing.getCodeUnits(func.getBody(), True):
+                comment_entries = []
+                for cmt_type, label, is_decompiled_type in ordered_types:
+                    text = code_unit.getComment(cmt_type)
+                    if not text:
+                        continue
+                    comment_entries.append((label, str(text), is_decompiled_type))
+
+                if not comment_entries:
+                    continue
+
+                should_prefix = len(comment_entries) > 1
+                parts = [
+                    f"[{label}] {text}" if should_prefix else text
+                    for label, text, _ in comment_entries
+                ]
+                has_decompiled = any(is_decompiled for _, _, is_decompiled in comment_entries)
+                has_disassembly = any(not is_decompiled for _, _, is_decompiled in comment_entries)
+                addr = int(code_unit.getAddress().getOffset())
+                comments[addr] = Comment(
+                    addr=addr,
+                    comment="\n".join(parts),
+                    decompiled=has_decompiled and not has_disassembly,
+                )
 
         return comments
 
@@ -1424,14 +1445,4 @@ class GhidraDecompilerInterface(DecompilerInterface):
             (typedef.getPathName(), typedef)
             for typedef in self.currentProgram.getDataTypeManager().getAllDataTypes()
             if isinstance(typedef, TypedefDB)
-        ]
-
-
-    def __function_code_units(self):
-        """
-        Returns a list of code units for each function in the program.
-        """
-        return [
-            [code_unit for code_unit in self.currentProgram.getListing().getCodeUnits(func.getBody(), True)]
-            for func in self.currentProgram.getFunctionManager().getFunctions(True)
         ]
