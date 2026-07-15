@@ -105,6 +105,8 @@ class TestHeadlessInterfaces(unittest.TestCase):
                             self.assertIs(server.requires_main_thread, expected)
 
     def test_ghidra_comment_slots(self):
+        import declib.decompilers.ghidra as ghidra_package
+
         class CodeUnit:
             EOL_COMMENT = 0
             PRE_COMMENT = 1
@@ -159,55 +161,56 @@ class TestHeadlessInterfaces(unittest.TestCase):
             "jpype": jpype,
             "declib.decompilers.ghidra.compat.imports": compat_imports,
         }
-        with patch.dict(sys.modules, modules):
-            sys.modules.pop("declib.decompilers.ghidra.interface", None)
-            from declib.decompilers.ghidra.interface import GhidraDecompilerInterface
+        with patch.object(ghidra_package, "interface", create=True):
+            with patch.dict(sys.modules, modules):
+                sys.modules.pop("declib.decompilers.ghidra.interface", None)
+                from declib.decompilers.ghidra.interface import GhidraDecompilerInterface
 
-            class TestableGhidraDecompilerInterface(GhidraDecompilerInterface):
-                @property
-                def currentProgram(self):
-                    return self._program_for_test
+                class TestableGhidraDecompilerInterface(GhidraDecompilerInterface):
+                    @property
+                    def currentProgram(self):
+                        return self._program_for_test
 
-            code_units = []
-            for index, (_, slot_comments, _, _) in enumerate(cases):
-                code_unit = MagicMock()
-                code_unit.getComment.side_effect = slot_comments.get
-                code_unit.getAddress.return_value.getOffset.return_value = 0x401000 + index * 0x10
-                code_units.append(code_unit)
+                code_units = []
+                for index, (_, slot_comments, _, _) in enumerate(cases):
+                    code_unit = MagicMock()
+                    code_unit.getComment.side_effect = slot_comments.get
+                    code_unit.getAddress.return_value.getOffset.return_value = 0x401000 + index * 0x10
+                    code_units.append(code_unit)
 
-            body = object()
-            func = MagicMock()
-            func.getBody.return_value = body
-            program = MagicMock()
-            program.getFunctionManager.return_value.getFunctions.return_value = [func]
-            program.getListing.return_value.getCodeUnits.return_value = code_units
+                body = object()
+                func = MagicMock()
+                func.getBody.return_value = body
+                program = MagicMock()
+                program.getFunctionManager.return_value.getFunctions.return_value = [func]
+                program.getListing.return_value.getCodeUnits.return_value = code_units
 
-            deci = object.__new__(TestableGhidraDecompilerInterface)
-            deci._program_for_test = program
-            comments = deci._comments()
+                deci = object.__new__(TestableGhidraDecompilerInterface)
+                deci._program_for_test = program
+                comments = deci._comments()
 
-            expected_addresses = {
-                0x401000 + index * 0x10
-                for index, (_, _, expected_text, _) in enumerate(cases)
-                if expected_text is not None
-            }
-            self.assertEqual(set(comments), expected_addresses)
-            for index, (name, _, expected_text, expected_decompiled) in enumerate(cases):
-                with self.subTest(case=name):
-                    addr = 0x401000 + index * 0x10
-                    if expected_text is None:
-                        self.assertNotIn(addr, comments)
-                        continue
+                expected_addresses = {
+                    0x401000 + index * 0x10
+                    for index, (_, _, expected_text, _) in enumerate(cases)
+                    if expected_text is not None
+                }
+                self.assertEqual(set(comments), expected_addresses)
+                for index, (name, _, expected_text, expected_decompiled) in enumerate(cases):
+                    with self.subTest(case=name):
+                        addr = 0x401000 + index * 0x10
+                        if expected_text is None:
+                            self.assertNotIn(addr, comments)
+                            continue
 
-                    comment = comments[addr]
-                    self.assertEqual(comment.addr, addr)
-                    self.assertIsNone(comment.func_addr)
-                    self.assertEqual(comment.comment, expected_text)
-                    self.assertEqual(comment.decompiled, expected_decompiled)
+                        comment = comments[addr]
+                        self.assertEqual(comment.addr, addr)
+                        self.assertIsNone(comment.func_addr)
+                        self.assertEqual(comment.comment, expected_text)
+                        self.assertEqual(comment.decompiled, expected_decompiled)
 
-            program.getFunctionManager.return_value.getFunctions.assert_called_once_with(True)
-            func.getBody.assert_called_once_with()
-            program.getListing.return_value.getCodeUnits.assert_called_once_with(body, True)
+                program.getFunctionManager.return_value.getFunctions.assert_called_once_with(True)
+                func.getBody.assert_called_once_with()
+                program.getListing.return_value.getCodeUnits.assert_called_once_with(body, True)
 
     def test_readme_example(self):
         # TODO: add angr
