@@ -70,6 +70,8 @@ class TestHeadlessInterfaces(unittest.TestCase):
             self.deci.shutdown()
 
     def test_ghidra_server_dispatch_requirement(self):
+        import declib.decompilers.ghidra as ghidra_package
+
         pyghidra = types.ModuleType("pyghidra")
         pyghidra_core = types.ModuleType("pyghidra.core")
         pyghidra_core._analyze_program = MagicMock()
@@ -83,23 +85,24 @@ class TestHeadlessInterfaces(unittest.TestCase):
             "pyghidra.core": pyghidra_core,
             "jpype": jpype,
         }
-        with patch.dict(sys.modules, modules):
-            sys.modules.pop("declib.decompilers.ghidra.interface", None)
-            from declib.decompilers.ghidra.interface import GhidraDecompilerInterface
+        with patch.object(ghidra_package, "interface", create=True):
+            with patch.dict(sys.modules, modules):
+                sys.modules.pop("declib.decompilers.ghidra.interface", None)
+                from declib.decompilers.ghidra.interface import GhidraDecompilerInterface
 
-            with patch.object(GhidraDecompilerInterface, "_init_gui_components"), \
-                    patch.object(GhidraDecompilerInterface, "_init_headless_components"):
-                for headless, expected in ((True, False), (False, True)):
-                    with self.subTest(headless=headless):
-                        deci = GhidraDecompilerInterface(
-                            headless=headless,
-                            config=MagicMock(),
-                        )
-                        server = object.__new__(DecompilerServer)
-                        server.deci = deci
+                with patch.object(GhidraDecompilerInterface, "_init_gui_components"), \
+                        patch.object(GhidraDecompilerInterface, "_init_headless_components"):
+                    for headless, expected in ((True, False), (False, True)):
+                        with self.subTest(headless=headless):
+                            deci = GhidraDecompilerInterface(
+                                headless=headless,
+                                config=MagicMock(),
+                            )
+                            server = object.__new__(DecompilerServer)
+                            server.deci = deci
 
-                        self.assertIs(deci.requires_main_thread_dispatch, expected)
-                        self.assertIs(server.requires_main_thread, expected)
+                            self.assertIs(deci.requires_main_thread_dispatch, expected)
+                            self.assertIs(server.requires_main_thread, expected)
 
     def test_readme_example(self):
         # TODO: add angr
