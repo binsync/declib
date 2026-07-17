@@ -538,6 +538,29 @@ class GhidraDecompilerInterface(DecompilerInterface):
             return None
         return "\n".join(lines) if lines else None
 
+    def search_bytes(self, pattern: bytes, max_results: int = 100) -> List[int]:
+        import jpype
+        from ghidra.util.task import TaskMonitor
+
+        memory = self.currentProgram.getMemory()
+        # Java bytes are signed; map 0..255 -> -128..127. Masks of 0xFF (-1)
+        # request an exact match on every byte.
+        byte_pat = jpype.JArray(jpype.JByte)([b - 256 if b >= 128 else b for b in pattern])
+        masks = jpype.JArray(jpype.JByte)([-1] * len(pattern))
+        results: List[int] = []
+        start = memory.getMinAddress()
+        while start is not None and len(results) < max_results:
+            try:
+                found = memory.findBytes(start, byte_pat, masks, True, TaskMonitor.DUMMY)
+            except Exception as exc:
+                _l.warning("Ghidra findBytes failed: %s", exc)
+                break
+            if found is None:
+                break
+            results.append(self.art_lifter.lift_addr(int(found.getOffset())))
+            start = found.add(1)
+        return results
+
     def read_memory(self, addr: int, size: int) -> Optional[bytes]:
         if size <= 0:
             return b""

@@ -17,6 +17,8 @@ Subcommands implemented:
 - xref_to         data + code references to a target
 - xref_from       things a function calls (callees)
 - comment         get/set/append/delete/list comments (annotations)
+- search          find bytes/string/instruction patterns
+- imports         list imported symbols
 - global          list/get/rename/retype global variables
 - signature       get/set a function's full signature (prototype)
 - rename          rename a function or local variable
@@ -1315,6 +1317,113 @@ def cmd_read_memory(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# search (bytes / string / instruction) + imports
+# ---------------------------------------------------------------------------
+
+def _enrich_with_function(client, addr: int) -> Optional[str]:
+    """Best-effort name of the function containing (or at) ``addr``."""
+    try:
+        func = client.functions.get_light(addr)
+        if func is not None:
+            return getattr(func, "name", None)
+    except Exception:
+        pass
+    return None
+
+
+def cmd_search(args) -> int:
+    """Search the binary by raw bytes, string, or instruction text."""
+    action = args.search_action
+    with _with_client(args) as client:
+        if action in ("bytes", "string"):
+            if action == "bytes":
+                cleaned = args.pattern.replace(" ", "").replace("0x", "")
+                try:
+                    pattern = bytes.fromhex(cleaned)
+                except ValueError:
+                    raise SystemExit(f"Invalid hex byte pattern: {args.pattern!r}")
+            else:
+                pattern = args.text.encode(args.encoding)
+            if not pattern:
+                raise SystemExit("Empty search pattern.")
+            try:
+                addrs = client.search_bytes(pattern, args.max)
+            except NotImplementedError as exc:
+                raise NotImplementedError(str(exc) or "byte search not available on this backend")
+            results = [{"addr": a} for a in addrs]
+            if args.json:
+                _emit(args, {"pattern_hex": pattern.hex(), "count": len(results), "matches": results})
+            else:
+                if not results:
+                    print("No matches.")
+                    return EXIT_OK
+                for a in addrs:
+                    print(_format_addr_hex(a))
+            return EXIT_OK
+
+        if action == "instruction":
+            # Client-side: grep the disassembly of each function. Works on every
+            # backend (disassemble is universal) at the cost of decompiling/
+            # disassembling as it goes, so it's capped by --max.
+            try:
+                pattern = re.compile(args.pattern, re.IGNORECASE)
+            except re.error as exc:
+                raise SystemExit(f"Invalid regex: {exc}")
+            matches: List[Dict] = []
+            for addr, func in sorted(client.functions.items(), key=lambda kv: kv[0]):
+                disasm = client.disassemble(addr) or ""
+                for line in disasm.splitlines():
+                    if pattern.search(line):
+                        matches.append({
+                            "func_addr": addr,
+                            "func": getattr(func, "name", None),
+                            "line": line.strip(),
+                        })
+                        if len(matches) >= args.max:
+                            break
+                if len(matches) >= args.max:
+                    break
+            if args.json:
+                _emit(args, {"pattern": args.pattern, "count": len(matches), "matches": matches})
+            else:
+                if not matches:
+                    print("No matching instructions.")
+                    return EXIT_OK
+                for m in matches:
+                    print(f"{_format_addr_hex(m['func_addr'])}\t{m['func'] or ''}\t{m['line']}")
+            return EXIT_OK
+
+        raise SystemExit(f"Unknown search action: {action}")
+
+
+def cmd_imports(args) -> int:
+    """List imported symbols (external functions/data)."""
+    with _with_client(args) as client:
+        try:
+            imps = client.list_imports()
+        except NotImplementedError as exc:
+            raise NotImplementedError(str(exc) or "import listing not available on this backend")
+        pattern = re.compile(args.filter) if args.filter else None
+        entries = []
+        for item in imps:
+            addr, name, lib = (list(item) + [None, None])[:3]
+            if pattern and not (name and pattern.search(name)):
+                continue
+            entries.append({"addr": addr, "name": name, "library": lib})
+        entries.sort(key=lambda e: (e.get("library") or "", e.get("name") or ""))
+        if args.json:
+            _emit_list(args, entries)
+        else:
+            if not entries:
+                print("No imports.")
+                return EXIT_OK
+            for e in entries:
+                lib = f"  [{e['library']}]" if e.get("library") else ""
+                print(f"{_format_addr_hex(e['addr']) if isinstance(e['addr'], int) else '?'}\t{e['name']}{lib}")
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
 # read (typed: int / string / struct)
 # ---------------------------------------------------------------------------
 
@@ -1891,6 +2000,43 @@ def build_parser() -> argparse.ArgumentParser:
     _add_server_filter_args(p_gc)
     _add_output_args(p_gc)
     p_gc.set_defaults(func=cmd_get_callers)
+
+    # search
+    p_search = sub.add_parser(
+        "search",
+        help="Search the binary by raw bytes, string, or instruction text.",
+    )
+    search_sub = p_search.add_subparsers(dest="search_action", required=True)
+
+    p_sb = search_sub.add_parser("bytes", help="Find a raw byte pattern (hex).")
+    p_sb.add_argument("pattern", help='Hex bytes, e.g. "7f454c46" or "7f 45 4c 46".')
+    p_sb.add_argument("--max", type=int, default=100, help="Max matches (default 100).")
+    _add_server_filter_args(p_sb)
+    _add_output_args(p_sb)
+    p_sb.set_defaults(func=cmd_search)
+
+    p_ss = search_sub.add_parser("string", help="Find a string's bytes in memory.")
+    p_ss.add_argument("text", help="Text to search for.")
+    p_ss.add_argument("--encoding", default="utf-8", help="Encoding (default utf-8).")
+    p_ss.add_argument("--max", type=int, default=100, help="Max matches (default 100).")
+    _add_server_filter_args(p_ss)
+    _add_output_args(p_ss)
+    p_ss.set_defaults(func=cmd_search)
+
+    p_si = search_sub.add_parser("instruction",
+                                 help="Regex-search disassembly across all functions.")
+    p_si.add_argument("pattern", help="Regex matched against disassembly lines.")
+    p_si.add_argument("--max", type=int, default=100, help="Max matches (default 100).")
+    _add_server_filter_args(p_si)
+    _add_output_args(p_si)
+    p_si.set_defaults(func=cmd_search)
+
+    # imports
+    p_imp = sub.add_parser("imports", help="List imported symbols (external functions/data).")
+    p_imp.add_argument("--filter", dest="filter", help="Regex to filter import names.")
+    _add_server_filter_args(p_imp)
+    _add_output_args(p_imp)
+    p_imp.set_defaults(func=cmd_imports)
 
     # read (typed)
     p_read = sub.add_parser(

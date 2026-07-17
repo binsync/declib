@@ -150,6 +150,10 @@ same binary.
 | `sync <func> --from-id <src>` | Copy a function's work (names, return/arg types, stack-var names+types, referenced user types) from one running server into another for the same binary. | dest: `--id`/`--binary`/`--backend`; `--json` |
 | `list_strings` | Strings the decompiler found (may be incomplete — see below). | `--filter`, `--min-length N`, same |
 | `get_callers <target>` | Call-sites only — subset of `xref_to`. | same |
+| `search bytes <hex>` | Find a raw byte pattern. | `--max`, same |
+| `search string <text>` | Find a string's bytes in memory. | `--encoding`, `--max`, same |
+| `search instruction <regex>` | Regex-search disassembly across all functions. | `--max`, same |
+| `imports` | List imported symbols (external functions/data). | `--filter REGEX`, same |
 | `read int/string/struct <addr> [...]` | Typed reads: decode memory as an integer, C string, or defined struct. | `--size`, `--signed`, `--endian`, `--max-len`, `--encoding`, same + `--json` |
 | `read_memory <addr> <size>` | Read raw bytes from the binary at `<addr>`. Default output is a hexdump. | `--format {hexdump,hex,raw}`, same + `--json` (base64-encoded bytes) |
 | `install-skill` | Install this file for Claude Code or Codex. | `--agent`, `--dest`, `--force`, `--json` |
@@ -234,6 +238,23 @@ saved database (IDA `.i64`, Ghidra project, Binary Ninja `.bndb`). `angr` is
 purely in-memory: `save` exits `2` (`not implemented`) and there is nothing to
 reload. IDA reopens the saved `.i64` directly (no re-analysis), so a reload after
 `save` is fast and lossless.
+
+### `search` and `imports` — discovery
+
+```bash
+decompiler search bytes "7f454c46"            # raw byte pattern (hex)
+decompiler search bytes "48 89 e5"            # spaces are ignored
+decompiler search string "SOSNEAKY"           # a string's bytes in memory
+decompiler search instruction "call.*puts"    # regex over disassembly
+decompiler imports --filter 'alloc|free'      # imported symbols
+```
+
+`search bytes`/`string` use the backend's native memory search (IDA, Ghidra,
+Binary Ninja); `angr` has no byte-search API, so those exit `2`
+(`not implemented`). `search instruction` is client-side (it greps each
+function's disassembly), so it works on **every** backend — but it disassembles
+as it goes, so keep `--max` modest on large binaries. `imports` is available on
+IDA, angr, and Binary Ninja; Ghidra returns `not implemented` for now.
 
 ### `read` — typed reads (int / string / struct)
 

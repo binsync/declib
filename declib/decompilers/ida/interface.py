@@ -332,6 +332,15 @@ class IDAInterface(DecompilerInterface):
         lowered = self.art_lifter.lower_addr(addr)
         return compat.read_memory(lowered, size)
 
+    def search_bytes(self, pattern: bytes, max_results: int = 100) -> List[int]:
+        return [self.art_lifter.lift_addr(ea) for ea in compat.search_bytes(pattern, max_results)]
+
+    def list_imports(self) -> List[tuple]:
+        out = []
+        for ea, name, lib in compat.list_imports():
+            out.append((self.art_lifter.lift_addr(ea), name, lib))
+        return out
+
     def _collect_xrefs_to(self, lowered_addr: int, only_code: bool,
                           _max_chase: int = 2) -> List[Artifact]:
         """Collect function-level xrefs to ``lowered_addr``.

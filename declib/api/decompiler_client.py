@@ -565,6 +565,14 @@ class DecompilerClient:
         """Read raw bytes from the loaded program."""
         return self._send_request({"type": "method_call", "method_name": "read_memory", "args": [addr, size]})
 
+    def search_bytes(self, pattern: bytes, max_results: int = 100) -> List[int]:
+        """Return lifted addresses where the byte pattern occurs."""
+        return self._send_request({"type": "method_call", "method_name": "search_bytes", "args": [pattern, max_results]})
+
+    def list_imports(self) -> List:
+        """Return (lifted_addr, name, library) tuples for imported symbols."""
+        return self._send_request({"type": "method_call", "method_name": "list_imports"})
+
     def save(self, path: Optional[str] = None) -> bool:
         """Persist the backend's analysis to disk. Raises NotImplementedError for in-memory backends."""
         return self._send_request({"type": "method_call", "method_name": "save", "args": [path]})

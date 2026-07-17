@@ -1977,6 +1977,43 @@ def wait_for_idc_initialization():
 
 
 @execute_write
+def search_bytes(pattern, max_results=100):
+    """Return every EA where ``pattern`` (a bytes object) occurs.
+
+    Walks the whole database with ``ida_bytes.find_bytes``, advancing one byte
+    past each hit, capped at ``max_results``.
+    """
+    results = []
+    lo = idaapi.inf_get_min_ea()
+    hi = idaapi.inf_get_max_ea()
+    ea = lo
+    while ea < hi and len(results) < max_results:
+        found = ida_bytes.find_bytes(pattern, ea)
+        if found is None or found == idaapi.BADADDR or found >= hi:
+            break
+        results.append(int(found))
+        ea = found + 1
+    return results
+
+
+@execute_write
+def list_imports():
+    """Return ``(ea, name, library)`` tuples for every imported symbol."""
+    imports = []
+    qty = idaapi.get_import_module_qty()
+    for i in range(qty):
+        modname = idaapi.get_import_module_name(i) or ""
+
+        def _cb(ea, name, ordn, _mod=modname):
+            if name:
+                imports.append((int(ea), str(name), _mod))
+            return True
+
+        idaapi.enum_import_names(i, _cb)
+    return imports
+
+
+@execute_write
 def set_function_prototype(func_addr, prototype):
     """Apply a full function prototype atomically via ``idc.SetType``.
 
