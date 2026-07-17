@@ -341,6 +341,18 @@ class IDAInterface(DecompilerInterface):
             out.append((self.art_lifter.lift_addr(ea), name, lib))
         return out
 
+    def define_function(self, addr) -> bool:
+        return compat.define_function(self.art_lifter.lower_addr(addr))
+
+    def define_code(self, addr) -> bool:
+        return compat.define_code(self.art_lifter.lower_addr(addr))
+
+    def define_data(self, addr, type_str=None, size=None) -> bool:
+        return compat.define_data(self.art_lifter.lower_addr(addr), type_str, size)
+
+    def undefine(self, addr, size=1) -> bool:
+        return compat.undefine(self.art_lifter.lower_addr(addr), size)
+
     def _collect_xrefs_to(self, lowered_addr: int, only_code: bool,
                           _max_chase: int = 2) -> List[Artifact]:
         """Collect function-level xrefs to ``lowered_addr``.

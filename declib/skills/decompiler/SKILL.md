@@ -154,6 +154,8 @@ same binary.
 | `search string <text>` | Find a string's bytes in memory. | `--encoding`, `--max`, same |
 | `search instruction <regex>` | Regex-search disassembly across all functions. | `--max`, same |
 | `imports` | List imported symbols (external functions/data). | `--filter REGEX`, same |
+| `define function/code/data <addr>` | Repair analysis: create a function, disassemble bytes, or define data. | `--type`, `--size` (data), same |
+| `undefine <addr>` | Clear code/data at an address (removes a function if one starts there). | `--size`, same |
 | `read int/string/struct <addr> [...]` | Typed reads: decode memory as an integer, C string, or defined struct. | `--size`, `--signed`, `--endian`, `--max-len`, `--encoding`, same + `--json` |
 | `read_memory <addr> <size>` | Read raw bytes from the binary at `<addr>`. Default output is a hexdump. | `--format {hexdump,hex,raw}`, same + `--json` (base64-encoded bytes) |
 | `install-skill` | Install this file for Claude Code or Codex. | `--agent`, `--dest`, `--force`, `--json` |
@@ -238,6 +240,23 @@ saved database (IDA `.i64`, Ghidra project, Binary Ninja `.bndb`). `angr` is
 purely in-memory: `save` exits `2` (`not implemented`) and there is nothing to
 reload. IDA reopens the saved `.i64` directly (no re-analysis), so a reload after
 `save` is fast and lossless.
+
+### `define` / `undefine` — repair analysis
+
+When auto-analysis misses a function or mislabels code as data (common on
+obfuscated or hand-written binaries), fix it:
+
+```bash
+decompiler define function 0x401200      # create a function IDA/Ghidra missed
+decompiler define code 0x401200          # disassemble bytes into an instruction
+decompiler define data 0x4040 --type int # define typed data
+decompiler define data 0x4040 --size 8   # or a raw 8-byte item
+decompiler undefine 0x401200 --size 32   # clear code/data; removes a function here
+```
+
+A realistic repair sequence is `undefine` → `define code` → `define function`.
+Supported on IDA, Ghidra, and Binary Ninja; `angr`'s CFG-based model has no
+define/undefine primitives (those commands exit `2`).
 
 ### `search` and `imports` — discovery
 

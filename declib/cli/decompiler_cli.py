@@ -19,6 +19,8 @@ Subcommands implemented:
 - comment         get/set/append/delete/list comments (annotations)
 - search          find bytes/string/instruction patterns
 - imports         list imported symbols
+- define          define a function/code/data at an address
+- undefine        clear code/data at an address
 - global          list/get/rename/retype global variables
 - signature       get/set a function's full signature (prototype)
 - rename          rename a function or local variable
@@ -1317,6 +1319,51 @@ def cmd_read_memory(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# define / undefine (code & data repair)
+# ---------------------------------------------------------------------------
+
+def cmd_define(args) -> int:
+    """Define a function, code, or data at an address (repair analysis)."""
+    action = args.define_action
+    with _with_client(args) as client:
+        addr_value, _ = _parse_target(args.addr)
+        if addr_value is None:
+            raise SystemExit(f"Invalid address {args.addr!r}; expected hex (0x..) or decimal.")
+        lifted = _to_lifted_addr(client, addr_value)
+
+        if action == "function":
+            ok = bool(client.define_function(lifted))
+        elif action == "code":
+            ok = bool(client.define_code(lifted))
+        elif action == "data":
+            ok = bool(client.define_data(lifted, getattr(args, "type", None), getattr(args, "size", None)))
+        else:
+            raise SystemExit(f"Unknown define action: {action}")
+
+        if not ok:
+            raise SystemExit(
+                f"Backend could not define {action} at {_format_addr_hex(lifted)} "
+                "(the address may already be defined that way, or be invalid)."
+            )
+        _emit(args, {"addr": lifted, "defined": action, "success": ok})
+        return EXIT_OK
+
+
+def cmd_undefine(args) -> int:
+    """Undefine (clear) code/data at an address; removes a function if one starts there."""
+    with _with_client(args) as client:
+        addr_value, _ = _parse_target(args.addr)
+        if addr_value is None:
+            raise SystemExit(f"Invalid address {args.addr!r}; expected hex (0x..) or decimal.")
+        lifted = _to_lifted_addr(client, addr_value)
+        ok = bool(client.undefine(lifted, args.size))
+        if not ok:
+            raise SystemExit(f"Nothing to undefine at {_format_addr_hex(lifted)}.")
+        _emit(args, {"addr": lifted, "size": args.size, "undefined": ok})
+        return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
 # search (bytes / string / instruction) + imports
 # ---------------------------------------------------------------------------
 
@@ -2000,6 +2047,44 @@ def build_parser() -> argparse.ArgumentParser:
     _add_server_filter_args(p_gc)
     _add_output_args(p_gc)
     p_gc.set_defaults(func=cmd_get_callers)
+
+    # define
+    p_def = sub.add_parser(
+        "define",
+        help="Define a function, code, or data at an address (repair analysis).",
+    )
+    def_sub = p_def.add_subparsers(dest="define_action", required=True)
+
+    p_deffn = def_sub.add_parser("function", help="Create a function at an address.")
+    p_deffn.add_argument("addr", help="Address (hex 0x.., decimal, lifted or absolute).")
+    _add_server_filter_args(p_deffn)
+    _add_output_args(p_deffn)
+    p_deffn.set_defaults(func=cmd_define)
+
+    p_defcode = def_sub.add_parser("code", help="Turn bytes at an address into an instruction.")
+    p_defcode.add_argument("addr", help="Address to disassemble.")
+    _add_server_filter_args(p_defcode)
+    _add_output_args(p_defcode)
+    p_defcode.set_defaults(func=cmd_define)
+
+    p_defdata = def_sub.add_parser("data", help="Define data at an address (optionally typed).")
+    p_defdata.add_argument("addr", help="Address of the data.")
+    p_defdata.add_argument("--type", dest="type", default=None,
+                          help='C type to apply, e.g. "int", "char[16]".')
+    p_defdata.add_argument("--size", dest="size", type=lambda x: int(x, 0), default=None,
+                          help="Byte size when no --type is given (default 1).")
+    _add_server_filter_args(p_defdata)
+    _add_output_args(p_defdata)
+    p_defdata.set_defaults(func=cmd_define)
+
+    # undefine
+    p_undef = sub.add_parser("undefine", help="Undefine (clear) code/data at an address.")
+    p_undef.add_argument("addr", help="Address to undefine.")
+    p_undef.add_argument("--size", dest="size", type=lambda x: int(x, 0), default=1,
+                        help="Number of bytes to undefine (default 1).")
+    _add_server_filter_args(p_undef)
+    _add_output_args(p_undef)
+    p_undef.set_defaults(func=cmd_undefine)
 
     # search
     p_search = sub.add_parser(

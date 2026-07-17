@@ -1977,6 +1977,54 @@ def wait_for_idc_initialization():
 
 
 @execute_write
+def define_function(addr):
+    """Create a function at ``addr`` (repairs missed auto-analysis)."""
+    return bool(ida_funcs.add_func(addr))
+
+
+@execute_write
+def define_code(addr):
+    """Turn the bytes at ``addr`` into an instruction. Returns True on success."""
+    return bool(idc.create_insn(addr))
+
+
+@execute_write
+def define_data(addr, type_str=None, size=None):
+    """Define data at ``addr``.
+
+    With a ``type_str`` we undefine the span and apply that type; otherwise we
+    create a plain byte/word/dword/qword sized item.
+    """
+    if type_str:
+        tif = convert_type_str_to_ida_type(type_str)
+        nbytes = (tif.get_size() if tif is not None else None) or size or 1
+        ida_bytes.del_items(addr, idc.DELIT_SIMPLE, nbytes)
+        return bool(idc.SetType(addr, type_str))
+
+    n = size or 1
+    ida_bytes.del_items(addr, idc.DELIT_SIMPLE, n)
+    flag_by_size = {
+        1: ida_bytes.FF_BYTE,
+        2: getattr(ida_bytes, "FF_WORD", ida_bytes.FF_BYTE),
+        4: ida_bytes.FF_DWORD,
+        8: getattr(ida_bytes, "FF_QWORD", ida_bytes.FF_DWORD),
+    }
+    flag = flag_by_size.get(n, ida_bytes.FF_BYTE)
+    return bool(ida_bytes.create_data(addr, flag, n, idaapi.BADADDR))
+
+
+@execute_write
+def undefine(addr, size=1):
+    """Undefine code/data at ``addr``. Removes a function if one starts here."""
+    removed = False
+    func = ida_funcs.get_func(addr)
+    if func is not None and func.start_ea == addr:
+        removed |= bool(ida_funcs.del_func(addr))
+    removed |= bool(ida_bytes.del_items(addr, idc.DELIT_SIMPLE, max(1, size)))
+    return removed
+
+
+@execute_write
 def search_bytes(pattern, max_results=100):
     """Return every EA where ``pattern`` (a bytes object) occurs.
 

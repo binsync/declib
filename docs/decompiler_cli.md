@@ -439,6 +439,28 @@ decompiler get_callers <target> [--id ID] [--binary PATH] [--backend BACKEND] [-
 Unlike `xref_to`, this never returns globals or other data refs. Rows are
 always of kind `Function`.
 
+### `define` and `undefine`
+
+Repair analysis: create functions, disassemble code, define data, or clear a
+region back to undefined bytes.
+
+```bash
+decompiler define function <addr> [--id ID] [--json]
+decompiler define code <addr> [--id ID] [--json]
+decompiler define data <addr> [--type C_TYPE | --size N] [--json]
+decompiler undefine <addr> [--size N] [--json]
+```
+
+```bash
+decompiler define function 0x401200      # create a missed function
+decompiler define data 0x4040 --type int
+decompiler undefine 0x401200 --size 32   # removes a function starting here
+```
+
+Supported on IDA, Ghidra, and Binary Ninja. `angr` has no define/undefine
+primitives and returns exit `2`. A realistic repair is `undefine` →
+`define code` → `define function`.
+
 ### `search` and `imports`
 
 Find byte/string/instruction patterns and enumerate imported symbols.
