@@ -439,6 +439,30 @@ decompiler get_callers <target> [--id ID] [--binary PATH] [--backend BACKEND] [-
 Unlike `xref_to`, this never returns globals or other data refs. Rows are
 always of kind `Function`.
 
+### `eval` / `exec` (UNSAFE backend scripting)
+
+An escape hatch for backend-specific work the abstracted API doesn't cover.
+**This executes arbitrary Python inside the backend process** — not portable,
+not sandboxed.
+
+```bash
+decompiler eval "<expression>" [--id ID] [--json]
+decompiler exec "<code>" [--id ID] [--json]
+decompiler exec --file <path.py> [--id ID] [--json]
+```
+
+`deci` is the live `DecompilerInterface`; the backend's own API is reachable
+through it (`idaapi` importable, `deci.flat_api` on Ghidra, `deci.project` on
+angr, `deci.bv` on Binary Ninja). `eval` returns the expression's `repr`;
+`exec` captures stdout and the value of a variable named `result`. Errors print
+a traceback and exit non-zero.
+
+```bash
+decompiler eval "deci.name"
+decompiler exec "print(hex(deci.binary_base_addr))"
+decompiler exec --file ./analysis.py
+```
+
 ### `patch`
 
 Apply, inspect, list, or revert byte patches.

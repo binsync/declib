@@ -668,6 +668,41 @@ class DecompilerInterface:
         """
         raise NotImplementedError("Import listing is not implemented for this backend.")
 
+    def backend_eval(self, code: str, mode: str = "eval") -> Dict:
+        """UNSAFE escape hatch: run arbitrary Python inside the backend process.
+
+        The code executes with this interface bound to ``deci`` and full access
+        to the backend's own Python API (``idaapi``, the Ghidra ``flat_api`` via
+        ``deci.flat_api``, ``deci.project`` for angr, ``deci.bv`` for Binary
+        Ninja, ...). This is deliberately backend-specific and not portable — it
+        exists for the cases the abstracted API doesn't cover.
+
+        @param code: Python source. ``mode='eval'`` evaluates a single
+            expression and returns its ``repr``; ``mode='exec'`` runs
+            statements, capturing stdout and any variable named ``result``.
+        @return: ``{"ok", "result", "stdout", "traceback"}``. (The failure key is
+            ``traceback`` rather than ``error`` on purpose — the client/server
+            wire protocol reserves a top-level ``error`` key for RPC failures.)
+        """
+        import io
+        import contextlib
+        import traceback as _traceback
+
+        env = {"deci": self, "__name__": "__declib_backend_eval__"}
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                if mode == "exec":
+                    exec(code, env)  # noqa: S102 - intentional escape hatch
+                    value = env.get("result", None)
+                    result = repr(value) if value is not None else ""
+                else:
+                    result = repr(eval(code, env))  # noqa: S307 - intentional escape hatch
+            return {"ok": True, "result": result, "stdout": out.getvalue(), "traceback": None}
+        except Exception:  # noqa: BLE001 - surface any backend error verbatim
+            return {"ok": False, "result": None, "stdout": out.getvalue(),
+                    "traceback": _traceback.format_exc()}
+
     def get_callgraph(self, only_names=False) -> nx.DiGraph:
         """
         Returns the callgraph of the binary. This is a dict of function addresses to a list of function addresses
