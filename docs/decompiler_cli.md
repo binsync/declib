@@ -353,6 +353,48 @@ Ghidra and Binary Ninja are more permissive. `angr` implements comment writes
 but not reads/enumeration, so `get`/`list` return nothing there. Use `save`
 (or `stop --save`) to persist comments across a reload.
 
+### `global`
+
+List, read, rename, or retype global variables.
+
+```bash
+decompiler global list [--filter REGEX] [--id ID] [--json]
+decompiler global get <addr> [--id ID] [--json]
+decompiler global rename <addr> <new_name> [--id ID] [--json]
+decompiler global retype <addr> <new_type> [--id ID] [--json]
+```
+
+```bash
+decompiler global list --filter 'key|flag'
+# ADDR         SIZE   TYPE                 NAME
+# 0x4040       8      char *               g_key
+decompiler global rename 0x4040 g_secret_key
+decompiler global retype 0x4040 "char[32]"
+```
+
+`rename` works everywhere globals are enumerated; `retype` is fully supported
+on IDA and Binary Ninja, best-effort on Ghidra. `angr` has no global-variable
+store, so its `global` commands return nothing.
+
+### `signature`
+
+Get or set a function's full signature (return type + argument types/names).
+
+```bash
+decompiler signature get <func> [--id ID] [--json]
+decompiler signature set <func> "<C prototype>" [--id ID] [--json]
+```
+
+```bash
+decompiler signature get main
+# int main(int argc, char **argv)
+decompiler signature set main "int main(int argc, char **argv, char **envp)"
+```
+
+IDA applies the whole prototype atomically via `SetType` (it can also change the
+parameter count). Ghidra and Binary Ninja retype/rename the parameters they
+already recognize. `angr` sets argument names but not types.
+
 ### `list_strings`
 
 List strings the decompiler's own string detector has identified in the

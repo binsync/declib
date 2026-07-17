@@ -1054,8 +1054,17 @@ class GhidraDecompilerInterface(DecompilerInterface):
 
             type_str = str(sym_data.getDataType().getPathName()) if sym_data is not None else None
             if gvar.type and gvar.type != type_str:
-                # TODO: set type
-                pass
+                gtype = self.typestr_to_gtype(gvar.type)
+                if gtype is not None:
+                    try:
+                        from ghidra.program.model.data import DataUtilities
+                        DataUtilities.createData(
+                            self.currentProgram, sym.getAddress(), gtype, -1,
+                            DataUtilities.ClearDataMode.CLEAR_ALL_CONFLICT_DATA,
+                        )
+                        changes = True
+                    except Exception as e:
+                        self.warning(f"Failed to set global var type {gvar.type!r}: {e}")
 
         return changes
 
@@ -1456,12 +1465,19 @@ class GhidraDecompilerInterface(DecompilerInterface):
         # TODO: this just does not work for bigger than 50k syms
         from .compat.imports import SymbolType
 
+        listing = self.currentProgram.getListing()
+        # Only real, memory-mapped data symbols are globals. Ghidra also emits
+        # symbols in synthetic/EXTERNAL address spaces (offset below the image
+        # base), which would lift to negative addresses and fail to round-trip;
+        # `memory.contains` filters those out.
+        memory = self.currentProgram.getMemory()
         return [
-            (int(sym.getAddress().getOffset()), str(sym.getName()), self.currentProgram.getListing().getDataAt(sym.getAddress()), sym)
+            (int(sym.getAddress().getOffset()), str(sym.getName()), listing.getDataAt(sym.getAddress()), sym)
             for sym in self.currentProgram.getSymbolTable().getAllSymbols(True)
             if sym.getSymbolType() == SymbolType.LABEL and
-            self.currentProgram.getListing().getDataAt(sym.getAddress()) and
-            not self.currentProgram.getListing().getDataAt(sym.getAddress()).isStructure()
+            memory.contains(sym.getAddress()) and
+            listing.getDataAt(sym.getAddress()) and
+            not listing.getDataAt(sym.getAddress()).isStructure()
         ]
 
 

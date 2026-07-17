@@ -1490,26 +1490,27 @@ def set_ida_struct_member_types(bs_struct: Struct):
 
 @execute_write
 def global_vars():
+    """Enumerate global variables as ``{ea: GlobalVariable}``.
+
+    Uses ``idautils.Names()`` (every named location) rather than scanning a
+    hardcoded pair of segments, so data symbols across ``.data``/``.bss``/
+    ``.rodata``/``.got`` all surface. Function starts and code labels are
+    filtered out — those aren't globals.
+    """
     gvars = {}
-    known_segs = [".artifacts", ".bss"]
-    for seg_name in known_segs:
-        seg = idaapi.get_segm_by_name(seg_name)
-        if not seg:
+    for ea, name in idautils.Names():
+        if not name:
             continue
-
-        for seg_ea in range(seg.start_ea, seg.end_ea):
-            xrefs = idautils.XrefsTo(seg_ea)
-            try:
-                next(xrefs)
-            except StopIteration:
-                continue
-
-            name = idaapi.get_name(seg_ea)
-            if not name:
-                continue
-
-            gvars[seg_ea] = GlobalVariable(seg_ea, name)
-
+        # Skip function entry points; they're functions, not globals.
+        func = ida_funcs.get_func(ea)
+        if func is not None and func.start_ea == ea:
+            continue
+        # Skip in-code labels; keep data (and undefined) items.
+        if ida_bytes.is_code(ida_bytes.get_flags(ea)):
+            continue
+        gvars[ea] = GlobalVariable(
+            ea, name, size=idaapi.get_item_size(ea), type_=idc.get_type(ea)
+        )
     return gvars
 
 
@@ -1973,6 +1974,18 @@ def disassemble_function(addr):
 @execute_write
 def wait_for_idc_initialization():
     idc.auto_wait()
+
+
+@execute_write
+def set_function_prototype(func_addr, prototype):
+    """Apply a full function prototype atomically via ``idc.SetType``.
+
+    IDA's own C parser handles the whole declaration (return type + argument
+    types + names) in one shot, which avoids the stale-``cfunc`` clobbering that
+    happens when return type and arguments are set through separate steps.
+    """
+    res = idc.SetType(func_addr, prototype)
+    return bool(res)
 
 
 @execute_write

@@ -141,6 +141,10 @@ same binary.
 | `comment list` | List every comment in the binary. | `--filter REGEX`, same |
 | `rename func <target> <new>` | Rename a function. | same + `--json` |
 | `rename var <old> <new> --function <f>` | Rename a local variable inside a function. | same |
+| `global list` | List global variables (ADDR, SIZE, TYPE, NAME). | `--filter REGEX`, same |
+| `global get/rename/retype <addr> [...]` | Read, rename, or retype the global at an address. | same |
+| `signature get <func>` | Print a function's full C prototype. | same |
+| `signature set <func> "<C prototype>"` | Set return type + argument types/names from a prototype. | same |
 | `create-type "<C definition>"` | Define a new `struct`/`enum`/`typedef` from a C string and add it to the type database. | same + `--json` |
 | `retype <func> <var> <type>` | Set the type of a function's local variable or argument. | same |
 | `sync <func> --from-id <src>` | Copy a function's work (names, return/arg types, stack-var names+types, referenced user types) from one running server into another for the same binary. | dest: `--id`/`--binary`/`--backend`; `--json` |
@@ -184,6 +188,26 @@ through the backend, so on IDA the address must be **inside a function**
 (disassembly comments elsewhere aren't supported by IDA's API). `angr`
 implements comment writes but not reads/enumeration yet — `comment get`/`list`
 return nothing there. Pair with `save` to make comments durable across reloads.
+
+### `global` and `signature` — globals and full prototypes
+
+```bash
+decompiler global list --filter 'key|flag'      # ADDR SIZE TYPE NAME
+decompiler global get 0x4008 --json
+decompiler global rename 0x4008 g_secret_key
+decompiler global retype 0x4008 "char[32]"
+
+decompiler signature get main                   # int main(int argc, char **argv)
+decompiler signature set main "int main(int argc, char **argv)"
+```
+
+`signature set` takes a full C prototype and applies the return type plus each
+argument's type and name. IDA applies the whole prototype atomically (it can
+also change the parameter count); Ghidra/Binary Ninja retype and rename the
+parameters they already recognize. `angr` sets argument *names* but not types.
+`global retype` is fully supported on IDA/Binary Ninja and best-effort on
+Ghidra; `angr` has no global-variable store (its `global` commands return
+nothing).
 
 ### Persistence — durable artifacts (`save`, `stop --save`)
 
