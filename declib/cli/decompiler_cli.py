@@ -21,6 +21,7 @@ Subcommands implemented:
 - imports         list imported symbols
 - define          define a function/code/data at an address
 - undefine        clear code/data at an address
+- patch           set/get/list/delete byte patches
 - global          list/get/rename/retype global variables
 - signature       get/set a function's full signature (prototype)
 - rename          rename a function or local variable
@@ -1319,6 +1320,70 @@ def cmd_read_memory(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# patch (set / get / list / delete)
+# ---------------------------------------------------------------------------
+
+def cmd_patch(args) -> int:
+    """Apply, inspect, list, or revert byte patches."""
+    from declib.artifacts import Patch
+
+    action = args.patch_action
+    with _with_client(args) as client:
+        if action == "list":
+            entries: List[Dict] = []
+            for addr, p in sorted(client.patches.items(), key=lambda kv: kv[0]):
+                data = getattr(p, "bytes", None) or b""
+                entries.append({"addr": addr, "size": len(data), "bytes": data.hex()})
+            if args.json:
+                _emit_list(args, entries)
+            else:
+                if not entries:
+                    print("No patches.")
+                    return EXIT_OK
+                for e in entries:
+                    print(f"{_format_addr_hex(e['addr'])}\t{e['size']}\t{e['bytes']}")
+            return EXIT_OK
+
+        addr_value, _ = _parse_target(args.addr)
+        if addr_value is None:
+            raise SystemExit(f"Invalid address {args.addr!r}; expected hex (0x..) or decimal.")
+        lifted = _to_lifted_addr(client, addr_value)
+
+        if action == "get":
+            p = client.get_patch(lifted)
+            if p is None:
+                raise SystemExit(f"No patch at {_format_addr_hex(lifted)}")
+            data = getattr(p, "bytes", None) or b""
+            _emit(args, {"addr": lifted, "size": len(data), "bytes": data.hex()})
+            return EXIT_OK
+
+        if action == "delete":
+            ok = bool(client.delete_patch(lifted))
+            if not ok:
+                raise SystemExit(f"Nothing to revert at {_format_addr_hex(lifted)}.")
+            _emit(args, {"addr": lifted, "reverted": ok})
+            return EXIT_OK
+
+        # set
+        cleaned = args.bytes.replace(" ", "").replace("0x", "")
+        try:
+            data = bytes.fromhex(cleaned)
+        except ValueError:
+            raise SystemExit(f"Invalid hex bytes: {args.bytes!r}")
+        if not data:
+            raise SystemExit("Empty patch.")
+        patch = Patch(addr=lifted, bytes_=data)
+        ok = bool(client.set_artifact(patch))
+        if not ok:
+            raise SystemExit(
+                f"Backend rejected the patch at {_format_addr_hex(lifted)} "
+                "(the backend may not support patching, or the region isn't writable)."
+            )
+        _emit(args, {"addr": lifted, "size": len(data), "bytes": data.hex(), "success": ok})
+        return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
 # define / undefine (code & data repair)
 # ---------------------------------------------------------------------------
 
@@ -2047,6 +2112,34 @@ def build_parser() -> argparse.ArgumentParser:
     _add_server_filter_args(p_gc)
     _add_output_args(p_gc)
     p_gc.set_defaults(func=cmd_get_callers)
+
+    # patch
+    p_patch = sub.add_parser("patch", help="Apply, inspect, list, or revert byte patches.")
+    patch_sub = p_patch.add_subparsers(dest="patch_action", required=True)
+
+    p_pset = patch_sub.add_parser("set", help="Patch bytes at an address (hex).")
+    p_pset.add_argument("addr", help="Address to patch (hex 0x.., decimal, lifted or absolute).")
+    p_pset.add_argument("bytes", help='Hex bytes, e.g. "90909090" or "90 90 90 90".')
+    _add_server_filter_args(p_pset)
+    _add_output_args(p_pset)
+    p_pset.set_defaults(func=cmd_patch)
+
+    p_pget = patch_sub.add_parser("get", help="Show the patch at an address.")
+    p_pget.add_argument("addr", help="Address of the patch.")
+    _add_server_filter_args(p_pget)
+    _add_output_args(p_pget)
+    p_pget.set_defaults(func=cmd_patch)
+
+    p_pdel = patch_sub.add_parser("delete", help="Revert the patch at an address.")
+    p_pdel.add_argument("addr", help="Address of the patch to revert.")
+    _add_server_filter_args(p_pdel)
+    _add_output_args(p_pdel)
+    p_pdel.set_defaults(func=cmd_patch)
+
+    p_plist = patch_sub.add_parser("list", help="List all byte patches in the binary.")
+    _add_server_filter_args(p_plist)
+    _add_output_args(p_plist)
+    p_plist.set_defaults(func=cmd_patch)
 
     # define
     p_def = sub.add_parser(

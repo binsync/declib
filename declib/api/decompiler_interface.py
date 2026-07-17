@@ -553,6 +553,17 @@ class DecompilerInterface:
         gvar = self._get_global_var(lowered)
         return self.art_lifter.lift(gvar) if gvar is not None else None
 
+    def get_patch(self, addr) -> Optional[Patch]:
+        """Return the lifted Patch at ``addr`` (lifted), or None (direct read)."""
+        lowered = self.art_lifter.lower_addr(addr)
+        patch = self._get_patch(lowered)
+        return self.art_lifter.lift(patch) if patch is not None else None
+
+    def delete_patch(self, addr) -> bool:
+        """Revert the patch at ``addr`` (lifted). True if bytes were reverted."""
+        lowered = self.art_lifter.lower_addr(addr)
+        return self._del_patch(lowered)
+
     def get_function_signature(self, func_addr) -> Optional[str]:
         """Return the C prototype string for the function at ``func_addr`` (lifted)."""
         from declib.api.prototype import format_prototype

@@ -439,6 +439,27 @@ decompiler get_callers <target> [--id ID] [--binary PATH] [--backend BACKEND] [-
 Unlike `xref_to`, this never returns globals or other data refs. Rows are
 always of kind `Function`.
 
+### `patch`
+
+Apply, inspect, list, or revert byte patches.
+
+```bash
+decompiler patch set <addr> <hex> [--id ID] [--json]
+decompiler patch get <addr> [--id ID] [--json]
+decompiler patch delete <addr> [--id ID] [--json]
+decompiler patch list [--id ID] [--json]
+```
+
+```bash
+decompiler patch set 0x401200 "9090"     # NOP two bytes
+decompiler patch list
+decompiler patch delete 0x401200         # revert (IDA)
+```
+
+`patch set` is implemented on IDA, Ghidra, and Binary Ninja; `angr` has no
+user-patch store. Patch tracking (`get`/`list`/`delete`/revert) is IDA-only for
+now — other backends apply the patch but don't record it. Use `save` to persist.
+
 ### `define` and `undefine`
 
 Repair analysis: create functions, disassemble code, define data, or clear a

@@ -609,6 +609,14 @@ class DecompilerClient:
         """Return the GlobalVariable at ``addr`` (lifted), or None. Direct read, no cache."""
         return self._send_request({"type": "method_call", "method_name": "get_global_var", "args": [addr]})
 
+    def get_patch(self, addr: int) -> Optional[Patch]:
+        """Return the Patch at ``addr`` (lifted), or None. Direct read, no cache."""
+        return self._send_request({"type": "method_call", "method_name": "get_patch", "args": [addr]})
+
+    def delete_patch(self, addr: int) -> bool:
+        """Revert the patch at ``addr`` (lifted)."""
+        return self._send_request({"type": "method_call", "method_name": "delete_patch", "args": [addr]})
+
     def get_function_signature(self, func_addr: int) -> Optional[str]:
         """Return the C prototype string for the function at ``func_addr`` (lifted)."""
         return self._send_request({"type": "method_call", "method_name": "get_function_signature", "args": [func_addr]})

@@ -693,8 +693,14 @@ class BinjaInterface(DecompilerInterface):
 
     # patches
     def _set_patch(self, patch: Patch, **kwargs) -> bool:
-        l.warning("Patch setting is unimplemented in Binja")
-        return False
+        if not patch.bytes:
+            return False
+        try:
+            written = self.bv.write(patch.addr, patch.bytes)
+        except Exception as e:
+            l.warning("Binary Ninja patch write failed: %s", e)
+            return False
+        return written == len(patch.bytes)
 
     def _get_patch(self, addr) -> Optional[Patch]:
         l.warning("Patch getting is unimplemented in Binja")

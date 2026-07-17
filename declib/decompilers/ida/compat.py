@@ -1977,6 +1977,19 @@ def wait_for_idc_initialization():
 
 
 @execute_write
+def revert_patch(addr, size):
+    """Revert ``size`` patched bytes at ``addr`` back to their original values."""
+    reverted = False
+    for i in range(max(1, size)):
+        ea = addr + i
+        orig = ida_bytes.get_original_byte(ea)
+        if ida_bytes.get_byte(ea) != orig:
+            ida_bytes.patch_byte(ea, orig)
+            reverted = True
+    return reverted
+
+
+@execute_write
 def define_function(addr):
     """Create a function at ``addr`` (repairs missed auto-analysis)."""
     return bool(ida_funcs.add_func(addr))
