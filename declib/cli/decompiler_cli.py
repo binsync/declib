@@ -17,6 +17,8 @@ Subcommands implemented:
 - xref_to         data + code references to a target
 - xref_from       things a function calls (callees)
 - comment         get/set/append/delete/list comments (annotations)
+- global          list/get/rename/retype global variables
+- signature       get/set a function's full signature (prototype)
 - rename          rename a function or local variable
 - create-type     define a new struct/enum/typedef from a C string
 - retype          change the type of a function's variable or argument
@@ -872,6 +874,124 @@ def cmd_comment(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# global (list / get / rename / retype)
+# ---------------------------------------------------------------------------
+
+def cmd_global(args) -> int:
+    """CRUD-lite for global variables, keyed by address."""
+    from declib.artifacts import GlobalVariable
+
+    action = args.global_action
+    with _with_client(args) as client:
+        if action == "list":
+            pattern = re.compile(args.filter) if args.filter else None
+            entries: List[Dict] = []
+            for addr, gv in sorted(client.global_vars.items(), key=lambda kv: kv[0]):
+                name = getattr(gv, "name", None) or ""
+                if pattern and not pattern.search(name):
+                    continue
+                entries.append({
+                    "addr": addr, "name": name,
+                    "type": getattr(gv, "type", None), "size": getattr(gv, "size", None),
+                })
+            if args.json:
+                _emit_list(args, entries)
+            else:
+                if not entries:
+                    print("No global variables.")
+                    return EXIT_OK
+                print(f"{'ADDR':<12} {'SIZE':<6} {'TYPE':<20} NAME")
+                for e in entries:
+                    print(f"{_format_addr_hex(e['addr']):<12} {str(e['size'] or ''):<6} "
+                          f"{str(e['type'] or ''):<20} {e['name']}")
+            return EXIT_OK
+
+        addr_value, _ = _parse_target(args.addr)
+        if addr_value is None:
+            raise SystemExit(f"Invalid address {args.addr!r}; expected hex (0x..) or decimal.")
+        lifted = _to_lifted_addr(client, addr_value)
+
+        if action == "get":
+            gv = client.get_global_var(lifted)
+            if gv is None:
+                raise SystemExit(f"No global variable at {_format_addr_hex(lifted)}")
+            _emit(args, {"addr": lifted, "name": gv.name, "type": gv.type, "size": gv.size})
+            return EXIT_OK
+
+        # rename / retype: build a partial GlobalVariable and push it through.
+        if action == "rename":
+            gvar = GlobalVariable(addr=lifted, name=args.new_name)
+        else:  # retype
+            gvar = GlobalVariable(addr=lifted, type_=args.new_type)
+        ok = bool(client.set_artifact(gvar))
+        if not ok:
+            raise SystemExit(
+                f"Backend rejected global {action} at {_format_addr_hex(lifted)} "
+                f"(the backend may not support this — e.g. Ghidra global retype is best-effort)."
+            )
+        refreshed = client.get_global_var(lifted)
+        _emit(args, {
+            "addr": lifted, "action": action,
+            "name": getattr(refreshed, "name", None),
+            "type": getattr(refreshed, "type", None),
+            "success": ok,
+        })
+        return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# signature (get / set) — full function prototype
+# ---------------------------------------------------------------------------
+
+def cmd_signature(args) -> int:
+    """Get or set a function's full signature (return type + argument types/names)."""
+    from declib.api.prototype import parse_prototype, format_prototype
+
+    action = args.signature_action
+    with _with_client(args) as client:
+        func_addr = _resolve_function_addr(client, args.function)
+        if func_addr is None:
+            raise SystemExit(f"Function not found: {args.function!r}")
+        known = _known_function_addrs(client)
+        if known and func_addr not in known:
+            raise SystemExit(f"Function not found: {args.function!r}")
+
+        if action == "get":
+            func = client.functions[func_addr]
+            if func is None or func.header is None:
+                raise SystemExit(f"No signature available for {args.function!r}")
+            proto = format_prototype(func.header)
+            _emit(args, {
+                "function_addr": func_addr,
+                "signature": proto,
+                "return_type": func.header.type,
+                "args": [{"name": a.name, "type": a.type}
+                         for _o, a in sorted(func.header.args.items())],
+            }, text_field="signature")
+            return EXIT_OK
+
+        # set: validate the prototype client-side for a clean error, then let
+        # the backend apply it (IDA uses SetType; others use the header path).
+        try:
+            parse_prototype(args.prototype)
+        except ValueError as exc:
+            raise SystemExit(f"Could not parse prototype: {exc}")
+
+        ok = bool(client.set_function_signature(func_addr, args.prototype))
+        if not ok:
+            raise SystemExit(f"Backend rejected the signature for {args.function!r}.")
+
+        refreshed = client.functions[func_addr]
+        _emit(args, {
+            "function_addr": func_addr,
+            "applied_signature": format_prototype(refreshed.header)
+            if refreshed is not None and refreshed.header else None,
+            "success": ok,
+        })
+        return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
 # create-type / retype
 # ---------------------------------------------------------------------------
 
@@ -1534,6 +1654,59 @@ def build_parser() -> argparse.ArgumentParser:
     _add_server_filter_args(p_clist)
     _add_output_args(p_clist)
     p_clist.set_defaults(func=cmd_comment)
+
+    # global
+    p_glob = sub.add_parser(
+        "global",
+        help="List/get/rename/retype global variables.",
+    )
+    glob_sub = p_glob.add_subparsers(dest="global_action", required=True)
+
+    p_glist = glob_sub.add_parser("list", help="List global variables.")
+    p_glist.add_argument("--filter", dest="filter", help="Regex to filter global names.")
+    _add_server_filter_args(p_glist)
+    _add_output_args(p_glist)
+    p_glist.set_defaults(func=cmd_global)
+
+    p_gget = glob_sub.add_parser("get", help="Show a global variable's name/type/size.")
+    p_gget.add_argument("addr", help="Address (hex 0x.., decimal, lifted or absolute).")
+    _add_server_filter_args(p_gget)
+    _add_output_args(p_gget)
+    p_gget.set_defaults(func=cmd_global)
+
+    p_gren = glob_sub.add_parser("rename", help="Rename the global variable at an address.")
+    p_gren.add_argument("addr", help="Address of the global variable.")
+    p_gren.add_argument("new_name", help="New name.")
+    _add_server_filter_args(p_gren)
+    _add_output_args(p_gren)
+    p_gren.set_defaults(func=cmd_global)
+
+    p_gret = glob_sub.add_parser("retype", help="Change the type of the global variable at an address.")
+    p_gret.add_argument("addr", help="Address of the global variable.")
+    p_gret.add_argument("new_type", help='New C type, e.g. "int", "char[16]", "void *".')
+    _add_server_filter_args(p_gret)
+    _add_output_args(p_gret)
+    p_gret.set_defaults(func=cmd_global)
+
+    # signature
+    p_sig = sub.add_parser(
+        "signature",
+        help="Get or set a function's full signature (return type + argument types/names).",
+    )
+    sig_sub = p_sig.add_subparsers(dest="signature_action", required=True)
+
+    p_sget = sig_sub.add_parser("get", help="Print a function's C prototype.")
+    p_sget.add_argument("function", help="Function name or address.")
+    _add_server_filter_args(p_sget)
+    _add_output_args(p_sget)
+    p_sget.set_defaults(func=cmd_signature)
+
+    p_sset = sig_sub.add_parser("set", help="Set a function's full signature from a C prototype.")
+    p_sset.add_argument("function", help="Function name or address.")
+    p_sset.add_argument("prototype", help='C prototype, e.g. "int main(int argc, char **argv)".')
+    _add_server_filter_args(p_sset)
+    _add_output_args(p_sset)
+    p_sset.set_defaults(func=cmd_signature)
 
     # create-type
     p_ct = sub.add_parser(

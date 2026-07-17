@@ -543,6 +543,50 @@ class DecompilerInterface:
         lowered = self.art_lifter.lower_addr(addr)
         return self._del_comment(lowered)
 
+    def get_global_var(self, addr) -> Optional[GlobalVariable]:
+        """Return the lifted GlobalVariable at ``addr`` (lifted), or None.
+
+        Direct backend read (bypasses the light-artifact cache), so a global
+        renamed/retyped moments earlier is immediately visible.
+        """
+        lowered = self.art_lifter.lower_addr(addr)
+        gvar = self._get_global_var(lowered)
+        return self.art_lifter.lift(gvar) if gvar is not None else None
+
+    def get_function_signature(self, func_addr) -> Optional[str]:
+        """Return the C prototype string for the function at ``func_addr`` (lifted)."""
+        from declib.api.prototype import format_prototype
+
+        func = self.functions[func_addr]
+        if func is None or func.header is None:
+            return None
+        return format_prototype(func.header)
+
+    def set_function_signature(self, func_addr, prototype: str) -> bool:
+        """Apply a full C prototype (return type + argument types/names).
+
+        The generic implementation parses the prototype and overwrites the
+        function's existing parameters positionally, then re-applies the
+        header through the normal set path. It retypes/renames the parameters
+        the backend already recognizes; it does not add or remove parameters.
+        Backends with an atomic prototype-set API (IDA's ``SetType``) override
+        this for fidelity.
+        """
+        from declib.api.prototype import parse_prototype
+
+        ret_type, arg_specs = parse_prototype(prototype)
+        func = self.functions[func_addr]
+        if func is None or func.header is None:
+            return False
+        if ret_type:
+            func.header.type = ret_type
+        for (_off, arg), (atype, aname) in zip(sorted(func.header.args.items()), arg_specs):
+            if atype and atype != "...":
+                arg.type = atype
+            if aname:
+                arg.name = aname
+        return bool(self.set_artifact(func))
+
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------

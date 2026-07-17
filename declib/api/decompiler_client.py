@@ -580,6 +580,18 @@ class DecompilerClient:
     def delete_comment(self, addr: int) -> bool:
         """Delete any comment at ``addr`` (lifted)."""
         return self._send_request({"type": "method_call", "method_name": "delete_comment", "args": [addr]})
+
+    def get_global_var(self, addr: int) -> Optional[GlobalVariable]:
+        """Return the GlobalVariable at ``addr`` (lifted), or None. Direct read, no cache."""
+        return self._send_request({"type": "method_call", "method_name": "get_global_var", "args": [addr]})
+
+    def get_function_signature(self, func_addr: int) -> Optional[str]:
+        """Return the C prototype string for the function at ``func_addr`` (lifted)."""
+        return self._send_request({"type": "method_call", "method_name": "get_function_signature", "args": [func_addr]})
+
+    def set_function_signature(self, func_addr: int, prototype: str) -> bool:
+        """Apply a full C prototype (return type + argument types/names)."""
+        return self._send_request({"type": "method_call", "method_name": "set_function_signature", "args": [func_addr, prototype]})
     
     def get_callgraph(self, only_names=False):
         """Get the call graph"""

@@ -167,6 +167,11 @@ class IDAInterface(DecompilerInterface):
         """Write the current IDB to disk (durable rename/type/comment artifacts)."""
         return compat.save_database(path)
 
+    def set_function_signature(self, func_addr, prototype: str) -> bool:
+        """Apply a full prototype via IDA's SetType (atomic, avoids clobbering)."""
+        lowered = self.art_lifter.lower_addr(func_addr)
+        return compat.set_function_prototype(lowered, prototype)
+
     def _init_gui_hooks(self):
         """
         This function can only be called from inside the compat.GenericIDAPlugin and is meant for IDA code which

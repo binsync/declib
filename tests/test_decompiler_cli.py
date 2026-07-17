@@ -534,6 +534,79 @@ class _CLIBackendTestBase(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
 
     # -------------------------------------------------------------------
+    # global variables
+    # -------------------------------------------------------------------
+
+    #: Backends that implement global-variable listing/reading.
+    _reads_globals: bool = True
+
+    def test_global_list(self):
+        if not self._reads_globals:
+            self.skipTest(f"{self.backend} does not implement global enumeration")
+        self._load_fauxware_isolated()
+        listing = json.loads(_run_cli("global", "list", "--json").stdout)
+        self.assertTrue(listing, f"{self.backend}: `global list` returned nothing")
+        for e in listing:
+            self.assertIn("addr", e)
+            self.assertIn("name", e)
+
+    def test_global_rename(self):
+        if not self._reads_globals:
+            self.skipTest(f"{self.backend} does not implement globals")
+        self._load_fauxware_isolated()
+        listing = json.loads(_run_cli("global", "list", "--json").stdout)
+        # Pick a real, addressable global (positive lifted addr + a name).
+        candidates = [g for g in listing if g.get("addr", -1) >= 0 and g.get("name")]
+        if not candidates:
+            self.skipTest(f"{self.backend}: no renameable globals")
+        target = candidates[0]
+        renamed = _run_cli("global", "rename", _format_hex(target["addr"]),
+                           "renamed_global_xyz", "--json", check=False)
+        if renamed.returncode != 0:
+            self.skipTest(f"{self.backend}: global rename unsupported: {renamed.stdout + renamed.stderr}")
+        payload = json.loads(renamed.stdout)
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["name"], "renamed_global_xyz",
+                         f"{self.backend}: global rename didn't stick")
+
+    # -------------------------------------------------------------------
+    # function signatures
+    # -------------------------------------------------------------------
+
+    def test_signature_get(self):
+        self._load_fauxware_isolated()
+        name = self._resolve_main_name()
+        result = _run_cli("signature", "get", name, "--json")
+        payload = json.loads(result.stdout)
+        self.assertIn("signature", payload)
+        self.assertIn("(", payload["signature"])
+        self.assertIsNotNone(payload.get("return_type"))
+
+    #: Backends that apply return/argument *types* via signature set (angr sets
+    #: only argument names today).
+    _sets_signature_types: bool = True
+
+    def test_signature_set(self):
+        self._load_fauxware_isolated()
+        name = self._resolve_main_name()
+        result = _run_cli("signature", "set", name, "long main(int argc, char **argv)",
+                          "--json", check=False)
+        if result.returncode != 0:
+            self.skipTest(f"{self.backend}: signature set unsupported: {result.stdout + result.stderr}")
+        self.assertTrue(json.loads(result.stdout)["success"])
+        if not self._sets_signature_types:
+            self.skipTest(f"{self.backend} sets arg names but not types via signature set")
+        # Verify the changed return type shows up on a fresh read.
+        got = json.loads(_run_cli("signature", "get", name, "--json").stdout)
+        self.assertIn("long", (got.get("return_type") or "").lower(),
+                      f"{self.backend}: signature set return type not reflected: {got}")
+
+    def test_signature_get_missing_exits_nonzero(self):
+        self._load_fauxware_isolated()
+        result = _run_cli("signature", "get", "no_such_function_xyz", check=False)
+        self.assertEqual(result.returncode, 1)
+
+    # -------------------------------------------------------------------
     # create-type / retype (run against every backend)
     # -------------------------------------------------------------------
 
@@ -629,6 +702,10 @@ class TestDecompilerCLIAngr(_CLIBackendTestBase):
     backend = "angr"
     # angr implements comment *writes* but not reads/enumeration yet.
     _reads_comments = False
+    # angr has no first-class global-variable store.
+    _reads_globals = False
+    # angr's signature set applies argument names but not types/return type.
+    _sets_signature_types = False
 
     # angr-specific sanity checks that don't map cleanly to the other
     # backends live here.
@@ -990,6 +1067,43 @@ class TestTypeDefinitionParser(unittest.TestCase):
 # Artifact-serialization unit tests: keep these separate from the CLI
 # subprocess tests so they run in isolation and are cheap to iterate on.
 # ---------------------------------------------------------------------------
+
+class TestPrototypeParser(unittest.TestCase):
+    """Backend-free tests for the C prototype parser/formatter."""
+
+    def test_parse_basic(self):
+        from declib.api.prototype import parse_prototype
+        ret, args = parse_prototype("int main(int argc, char **argv)")
+        self.assertEqual(ret, "int")
+        self.assertEqual(args, [("int", "argc"), ("char **", "argv")])
+
+    def test_parse_pointer_return_and_varargs(self):
+        from declib.api.prototype import parse_prototype
+        ret, args = parse_prototype("char *printf(const char *fmt, ...)")
+        self.assertEqual(ret, "char *")
+        self.assertEqual(args[0], ("const char *", "fmt"))
+        self.assertEqual(args[1], ("...", None))
+
+    def test_parse_void_args(self):
+        from declib.api.prototype import parse_prototype
+        ret, args = parse_prototype("unsigned long long foo(void)")
+        self.assertEqual(ret, "unsigned long long")
+        self.assertEqual(args, [])
+
+    def test_parse_bad_raises(self):
+        from declib.api.prototype import parse_prototype
+        for bad in ["int main", "no parens here", "(int a)"]:
+            with self.assertRaises(ValueError):
+                parse_prototype(bad)
+
+    def test_format_roundtrip(self):
+        from declib.api.prototype import format_prototype
+        from declib.artifacts import FunctionHeader, FunctionArgument
+        h = FunctionHeader(name="f", addr=0x1000, type_="int",
+                           args={0: FunctionArgument(0, "a", "int", 4),
+                                 1: FunctionArgument(1, "b", "char *", 8)})
+        self.assertEqual(format_prototype(h), "int f(int a, char *b)")
+
 
 class TestArtifactWireSerialization(unittest.TestCase):
     """The client↔server wire format must survive tricky decompilation text.
