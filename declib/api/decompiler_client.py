@@ -572,6 +572,14 @@ class DecompilerClient:
     def set_persist_on_close(self, value: bool) -> bool:
         """Control whether the backend flushes to disk on teardown."""
         return self._send_request({"type": "method_call", "method_name": "set_persist_on_close", "args": [value]})
+
+    def get_comment(self, addr: int) -> Optional[Comment]:
+        """Return the Comment at ``addr`` (lifted), or None. Direct read, no cache."""
+        return self._send_request({"type": "method_call", "method_name": "get_comment", "args": [addr]})
+
+    def delete_comment(self, addr: int) -> bool:
+        """Delete any comment at ``addr`` (lifted)."""
+        return self._send_request({"type": "method_call", "method_name": "delete_comment", "args": [addr]})
     
     def get_callgraph(self, only_names=False):
         """Get the call graph"""

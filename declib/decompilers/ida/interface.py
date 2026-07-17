@@ -611,12 +611,13 @@ class IDAInterface(DecompilerInterface):
         if ida_cmt is None:
             return None
 
-        # TODO: need to be better implemented!
         return Comment(addr=addr, comment=str(ida_cmt), decompiled=True)
 
+    def _del_comment(self, addr) -> bool:
+        return compat.del_ida_comment(addr)
+
     def _comments(self) -> Dict[int, Comment]:
-        # TODO: implement me!
-        return {}
+        return compat.comments()
 
     # segments
     def _set_segment(self, segment: Segment, **kwargs) -> bool:
