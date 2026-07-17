@@ -81,6 +81,19 @@ class IDAInterface(DecompilerInterface):
         """
         super()._init_headless_components(*args, **kwargs)
         binary_path = str(self.binary_path)
+
+        # If a saved database already exists (from a prior `save`), reopen it
+        # directly. Passing the original binary + `-o<existing.i64>` makes
+        # idalib prompt to overwrite, which hangs headless — and re-analyzing
+        # would clobber the user's persisted renames/types/comments. Reopening
+        # the .i64 with auto-analysis off is both fast and lossless.
+        existing_db = self._existing_database_path()
+        if existing_db is not None:
+            _l.info("Reopening existing IDA database %s", existing_db)
+            if idapro.open_database(existing_db, False):
+                raise RuntimeError(f"Failed to reopen database {existing_db}")
+            return
+
         extra_args = self._ida_open_args()
         # IDA <= 9.1 only accepts (path, run_auto_analysis); the extra_args
         # parameter was added in 9.2.
@@ -96,6 +109,29 @@ class IDAInterface(DecompilerInterface):
         if failure:
             raise RuntimeError(f"Failed to open database {binary_path}")
 
+    def _ida_db_base(self):
+        """Return the database base path (no extension) IDA writes to.
+
+        With ``project_dir`` set the database lives at
+        ``<project_dir>/ida/<binary>``; otherwise IDA drops it beside the
+        binary. IDA appends ``.i64``/``.idb`` itself.
+        """
+        from pathlib import Path as _Path
+
+        if not self._project_dir:
+            return _Path(str(self.binary_path))
+        project_dir = _Path(self._project_dir).expanduser().resolve()
+        return project_dir / "ida" / _Path(str(self.binary_path)).name
+
+    def _existing_database_path(self) -> Optional[str]:
+        """Path to a previously-saved IDA database for this binary, or None."""
+        base = self._ida_db_base()
+        for ext in (".i64", ".idb"):
+            candidate = base.parent / (base.name + ext)
+            if candidate.exists():
+                return str(candidate)
+        return None
+
     def _ida_open_args(self) -> Optional[str]:
         """Build the extra args string passed to ``idapro.open_database``.
 
@@ -106,26 +142,30 @@ class IDAInterface(DecompilerInterface):
         user / other backends leave in the top-level project_dir (Ghidra's
         ``<binary>_ghidra/`` project, stale symlinks, etc.).
         """
-        from pathlib import Path as _Path
-
         if not self._project_dir:
             return None
 
-        project_dir = _Path(self._project_dir).expanduser().resolve()
-        ida_dir = project_dir / "ida"
-        ida_dir.mkdir(parents=True, exist_ok=True)
-        binary_name = _Path(str(self.binary_path)).name
+        db_base = self._ida_db_base()
+        db_base.parent.mkdir(parents=True, exist_ok=True)
         # IDA's -o takes the database base path (no extension); it picks
         # .idb / .i64 / .id* itself.
-        db_base = ida_dir / binary_name
         return f"-o{db_base}"
 
     def _deinit_headless_components(self):
         """
         This function deinitializes the headless functionality of IDA through idalib.
         This also means that this feature is only supported in IDA versions >= 9.0
+
+        ``persist_on_close`` (default False) decides whether the IDB is written
+        out on the way down. ``decompiler stop --save`` sets it (or calls
+        ``save()`` explicitly) so the database survives; the default discards
+        the in-memory database, matching legacy behavior.
         """
-        idapro.close_database(False)
+        idapro.close_database(bool(self.persist_on_close))
+
+    def save(self, path=None) -> bool:
+        """Write the current IDB to disk (durable rename/type/comment artifacts)."""
+        return compat.save_database(path)
 
     def _init_gui_hooks(self):
         """

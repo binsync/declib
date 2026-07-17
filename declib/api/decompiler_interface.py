@@ -528,6 +528,40 @@ class DecompilerInterface:
         """
         raise NotImplementedError
 
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+    #: Whether the backend should flush its analysis to disk when the
+    #: interface is torn down (``shutdown()`` -> ``_deinit_headless_components``).
+    #: Backends override the default to match their native behavior (IDA
+    #: discards on close, Ghidra saves on close). ``set_persist_on_close``
+    #: flips it so ``decompiler stop --save/--discard`` can control the final
+    #: flush without an extra round-trip.
+    persist_on_close: bool = False
+
+    def save(self, path: Optional[str] = None) -> bool:
+        """Persist the current analysis to the backend's on-disk database/project.
+
+        This is the durable-artifact primitive: after ``save()`` returns True,
+        renames/retypes/comments made through DecLib survive a stop + reload of
+        the same project directory. Backends that hold no persistent database
+        (e.g. angr, which is purely in-memory) raise ``NotImplementedError``.
+
+        @param path: Optional explicit output path. When ``None`` the backend
+            writes to whatever database/project it already has open.
+        @return: True on success.
+        """
+        raise NotImplementedError("This backend does not support saving to disk.")
+
+    def set_persist_on_close(self, value: bool) -> bool:
+        """Control whether teardown flushes analysis to disk.
+
+        Used by ``decompiler stop --save/--discard`` to decide the final flush
+        for backends (like Ghidra) that persist on close by default.
+        """
+        self.persist_on_close = bool(value)
+        return True
+
     def get_callgraph(self, only_names=False) -> nx.DiGraph:
         """
         Returns the callgraph of the binary. This is a dict of function addresses to a list of function addresses

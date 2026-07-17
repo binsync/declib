@@ -129,7 +129,8 @@ same binary.
 |---|---|---|
 | `load <bin>` | Start a server on the binary. Idempotent: returns existing unless `--force`/`--replace`. | `--backend`, `--id`, `--force`, `--replace`, `--project-dir`, `--json` |
 | `list` | Show all running servers and the registry path. | `--show-registry`, `--json` |
-| `stop` | Shut down one or all servers. | `--id`, `--binary`, `--all`, `--json` |
+| `stop` | Shut down one or all servers. `--save` flushes analysis to disk first; `--discard` drops unsaved edits. | `--id`, `--binary`, `--all`, `--save`, `--discard`, `--json` |
+| `save` | Persist backend analysis to disk so renames/types/comments survive a reload. | `--path`, `--id`, `--binary`, `--backend`, `--json` |
 | `list_functions` | Enumerate every function (ADDR, SIZE, NAME). | `--filter REGEX`, `--json` |
 | `decompile <target>` | Pseudocode for a function (name or address). | `--raw`, `--id`, `--binary`, `--backend`, `--json` |
 | `disassemble <target>` | Assembly for a function. | `--raw`, same |
@@ -159,6 +160,31 @@ same binary.
   contain a `call` to the target. When you want "who calls this?" reach
   for `get_callers`; when you want "who touches this in any way?" reach
   for `xref_to`.
+
+### Persistence — durable artifacts (`save`, `stop --save`)
+
+By default a server holds the binary open in memory; IDA discards edits on
+stop, while Ghidra persists on close. To make renames/types/comments **durable**
+regardless of backend, `save` explicitly, or stop with `--save`:
+
+```bash
+decompiler load ./fauxware --backend ida --project-dir ./proj
+decompiler rename func authenticate auth_check
+decompiler save                       # writes ./proj/ida/fauxware.i64
+decompiler stop --id <id>
+decompiler load ./fauxware --backend ida --project-dir ./proj  # reopens saved DB
+decompiler list_functions --filter auth_check   # the rename is still there
+# {"saved": true, "path": null}
+
+decompiler stop --all --save          # flush every server before shutting down
+decompiler stop --id <id> --discard   # drop unsaved edits (revert to analyzed state)
+```
+
+Reuse the **same `--project-dir`** across load/reload so the backend finds its
+saved database (IDA `.i64`, Ghidra project, Binary Ninja `.bndb`). `angr` is
+purely in-memory: `save` exits `2` (`not implemented`) and there is nothing to
+reload. IDA reopens the saved `.i64` directly (no re-analysis), so a reload after
+`save` is fast and lossless.
 
 ### `read_memory` — raw bytes at an address
 
@@ -270,8 +296,10 @@ decompiler decompile main --raw
 
 - **First `load` is slow** (backend analysis pass). Subsequent calls on the
   same server are fast.
-- **`rename` exit codes**: every CLI command exits `0` on success and `1`
-  on any failure (including "rename didn't find the old name"). Use
+- **Exit codes**: every CLI command exits `0` on success and `1`
+  on failure (including "rename didn't find the old name"). Exit `2` means
+  the feature is **not implemented for the selected backend** (e.g. `save`
+  on angr) — distinct from a real error so scripts can branch on it. Use
   `&&` safely.
 - **Stripped binaries**: use `list_functions` before `decompile` to find
   the real entry. `main` may not exist; look for non-default names

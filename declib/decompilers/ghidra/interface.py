@@ -19,7 +19,7 @@ from declib.artifacts import (
 
 from .artifact_lifter import GhidraArtifactLifter
 from .compat.transaction import ghidra_transaction
-from .compat.headless import close_program, open_program
+from .compat.headless import close_program, open_program, save_program
 from .compat.state import get_current_address
 
 if typing.TYPE_CHECKING:
@@ -82,6 +82,11 @@ class GhidraDecompilerInterface(DecompilerInterface):
         self._results_queue = queue.Queue()
         self.requires_main_thread_dispatch = not kwargs.get("headless", False)
 
+        # Ghidra flushes the ProgramDB into the project on teardown by default,
+        # so a reload already sees prior work. `decompiler stop --discard` flips
+        # this off to drop unsaved edits.
+        self.persist_on_close = True
+
         super().__init__(
             name="ghidra",
             artifact_lifter=GhidraArtifactLifter(self),
@@ -100,9 +105,21 @@ class GhidraDecompilerInterface(DecompilerInterface):
 
     def _deinit_headless_components(self):
         if self._program is not None and self._project is not None:
-            close_program(self._program, self._project)
+            close_program(self._program, self._project, save=bool(self.persist_on_close))
             self._project = None
             self._program = None
+
+    def save(self, path=None) -> bool:
+        """Persist the Ghidra program into its project on disk.
+
+        ``path`` is ignored: Ghidra saves back into the project the binary was
+        imported into (set via ``--project-dir``). Returns False when running
+        against a caller-provided program with no owned project.
+        """
+        if self._program is None or self._project is None:
+            _l.warning("No owned Ghidra project to save (program provided externally).")
+            return False
+        return save_program(self._program, self._project)
 
     def _init_headless_components(self, *args, **kwargs):
         if self._program is not None:

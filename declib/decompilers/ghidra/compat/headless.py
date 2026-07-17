@@ -138,16 +138,35 @@ def _setup_project(
 
     return project, program
 
-def close_program(program, project) -> bool:
+def save_program(program, project) -> bool:
+    """Flush the program's changes into its project file on disk.
+
+    Ghidra writes edits into the in-memory ``ProgramDB`` via transactions;
+    ``GhidraProject.save`` is what persists them to the ``.gpr``/``.rep`` so a
+    later reopen sees the renames/types/comments.
+    """
+    try:
+        project.save(program)
+        return True
+    except Exception as e:
+        _l.critical("Failed to save program: %s", e)
+    return False
+
+
+def close_program(program, project, save=True) -> bool:
     """
     Returns true if closing was successful, false otherwise.
 
+    When ``save`` is False the in-memory changes are discarded (the on-disk
+    project keeps whatever was last saved — the freshly-analyzed program), which
+    is how ``decompiler stop --discard`` reverts unsaved work.
     """
     from ghidra.app.script import GhidraScriptUtil
 
     try:
         GhidraScriptUtil.releaseBundleHostReference()
-        project.save(program)
+        if save:
+            project.save(program)
         project.close()
         return True
     except Exception as e:

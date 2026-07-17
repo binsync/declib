@@ -384,6 +384,81 @@ class _CLIBackendTestBase(unittest.TestCase):
                                 f"{self.backend} wrote nothing to the project_dir")
 
     # -------------------------------------------------------------------
+    # Persistence: explicit save + stop --save/--discard, reopen-and-verify
+    # -------------------------------------------------------------------
+
+    def _isolated_proj(self):
+        """A fresh, dot-free project dir (Ghidra rejects dot-prefixed paths)."""
+        proj = tempfile.mkdtemp(prefix="declib_persist_proj_")
+        self.addCleanup(shutil.rmtree, proj, ignore_errors=True)
+        return proj
+
+    def test_save_unsupported_on_inmemory_backend(self):
+        """Backends with no on-disk database report `save` as unsupported (exit 2)."""
+        if self._persists_project_files:
+            self.skipTest(f"{self.backend} persists to disk; covered by reopen tests")
+        self._load_fauxware()
+        result = _run_cli("save", "--json", check=False)
+        self.assertEqual(result.returncode, 2,
+                         f"{self.backend}: expected unsupported exit 2, got {result.returncode}: "
+                         f"{result.stdout + result.stderr}")
+        self.assertIn("not implemented", (result.stdout + result.stderr).lower())
+
+    def test_save_command_persists_rename_across_reload(self):
+        """`save` then stop then reload (same project-dir) keeps a function rename."""
+        if not self._persists_project_files:
+            self.skipTest(f"{self.backend} is in-memory; nothing to persist")
+        proj = self._isolated_proj()
+        loaded = self._load_fauxware(project_dir=proj)
+        server_id = loaded["id"]
+
+        new_name = "persisted_via_save"
+        renamed = _run_cli("rename", "func", "authenticate", new_name, "--json")
+        self.assertTrue(json.loads(renamed.stdout)["success"],
+                        f"{self.backend}: rename failed: {renamed.stdout}")
+
+        saved = _run_cli("save", "--json")
+        self.assertTrue(json.loads(saved.stdout)["saved"],
+                        f"{self.backend}: save reported failure: {saved.stdout}")
+
+        _run_cli("stop", "--id", server_id, "--json")
+
+        # Reopen the same project dir in a fresh server and confirm the rename
+        # survived the round-trip to disk.
+        self._load_fauxware(project_dir=proj)
+        listing = json.loads(_run_cli("list_functions", "--filter", new_name, "--json").stdout)
+        names = {e["name"] for e in listing}
+        self.assertIn(new_name, names,
+                      f"{self.backend}: rename did not persist across reload; saw {names}")
+
+    def test_stop_save_persists_rename_across_reload(self):
+        """`stop --save` flushes to disk so a reload sees the rename."""
+        if not self._persists_project_files:
+            self.skipTest(f"{self.backend} is in-memory; nothing to persist")
+        proj = self._isolated_proj()
+        loaded = self._load_fauxware(project_dir=proj)
+        server_id = loaded["id"]
+
+        new_name = "persisted_via_stop_save"
+        renamed = _run_cli("rename", "func", "authenticate", new_name, "--json")
+        self.assertTrue(json.loads(renamed.stdout)["success"])
+
+        stopped = _run_cli("stop", "--id", server_id, "--save", "--json")
+        self.assertTrue(json.loads(stopped.stdout)["stopped"][0]["stopped"])
+
+        self._load_fauxware(project_dir=proj)
+        listing = json.loads(_run_cli("list_functions", "--filter", new_name, "--json").stdout)
+        names = {e["name"] for e in listing}
+        self.assertIn(new_name, names,
+                      f"{self.backend}: rename did not persist via stop --save; saw {names}")
+
+    def test_stop_save_and_discard_are_mutually_exclusive(self):
+        loaded = self._load_fauxware()
+        result = _run_cli("stop", "--id", loaded["id"], "--save", "--discard", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("mutually exclusive", result.stdout + result.stderr)
+
+    # -------------------------------------------------------------------
     # create-type / retype (run against every backend)
     # -------------------------------------------------------------------
 

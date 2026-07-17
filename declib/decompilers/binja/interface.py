@@ -103,6 +103,25 @@ class BinjaInterface(DecompilerInterface):
         if self.headless and BN_AVAILABLE:
             self.bv.file.close()
 
+    def save(self, path=None) -> bool:
+        """Persist analysis to a Binary Ninja database (``.bndb``).
+
+        ``binaryninja.load`` opens the raw file with no backing database, so
+        the first save creates one; subsequent saves snapshot into it. When no
+        ``path`` is given we derive ``<binary>.bndb`` next to the binary.
+        """
+        if self.bv is None:
+            return False
+        file_metadata = self.bv.file
+        try:
+            if file_metadata.filename and file_metadata.filename.endswith(".bndb"):
+                return bool(file_metadata.save_auto_snapshot())
+            target = path or (str(self._binary_path) + ".bndb")
+            return bool(file_metadata.create_database(target))
+        except Exception as e:
+            l.warning("Failed to save Binary Ninja database: %s", e)
+            return False
+
     #
     # GUI
     #
