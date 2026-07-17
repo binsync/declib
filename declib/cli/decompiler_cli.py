@@ -25,6 +25,7 @@ Subcommands implemented:
 - sync            copy work on a function from one server into another
 - list_strings    list strings in the binary, optionally filtered by regex
 - get_callers     functions (call sites only) that call a target
+- read            typed reads: int/string/struct at an address
 - read_memory     read raw bytes from the binary at an address
 - install-skill   install the bundled Agent Skill so LLMs learn the CLI
 """
@@ -1267,11 +1268,15 @@ def cmd_read_memory(args) -> int:
         raise SystemExit(f"--size must be > 0 (got {args.size})")
 
     with _with_client(args) as client:
-        data = client.read_memory(addr_value, args.size)
+        # Normalize absolute addresses to the server's lifted form so that
+        # `0x402320` and the image-relative `0x2320` both land on the same
+        # byte instead of the backend double-adding the image base.
+        lifted = _to_lifted_addr(client, addr_value)
+        data = client.read_memory(lifted, args.size)
         if data is None:
             raise SystemExit(
                 f"Backend could not read 0x{args.size:x} bytes at "
-                f"{_format_addr_hex(addr_value)}. The address may be "
+                f"{_format_addr_hex(lifted)}. The address may be "
                 "uninitialized, unmapped, or outside any loaded segment."
             )
         # Some backends return short reads when the request straddles the
@@ -1285,7 +1290,7 @@ def cmd_read_memory(args) -> int:
 
         if args.json:
             payload = {
-                "addr": addr_value,
+                "addr": lifted,
                 "size": actual_size,
                 "requested_size": args.size,
                 "bytes_b64": base64.b64encode(data).decode("ascii"),
@@ -1299,7 +1304,7 @@ def cmd_read_memory(args) -> int:
             return 0
 
         # Default: hexdump-style output.
-        for line in _hexdump(data, base_addr=addr_value):
+        for line in _hexdump(data, base_addr=lifted):
             print(line)
         if actual_size < args.size:
             print(
@@ -1307,6 +1312,106 @@ def cmd_read_memory(args) -> int:
                 file=sys.stderr,
             )
     return 0
+
+
+# ---------------------------------------------------------------------------
+# read (typed: int / string / struct)
+# ---------------------------------------------------------------------------
+
+def _decode_scalar(type_str: Optional[str], chunk: bytes, endian: str = "little"):
+    """Best-effort decode of a struct member's bytes based on its C type."""
+    if not chunk:
+        return None
+    t = (type_str or "").strip()
+    if t.endswith("*"):  # pointer
+        return _format_addr_hex(int.from_bytes(chunk, endian, signed=False))
+    if "char" in t and "[" in t:  # char array -> string
+        nul = chunk.find(b"\x00")
+        raw = chunk[:nul] if nul != -1 else chunk
+        return raw.decode("utf-8", errors="replace")
+    if "[" not in t and len(chunk) in (1, 2, 4, 8):  # scalar integer
+        return int.from_bytes(chunk, endian, signed=False)
+    return None  # unknown/aggregate: caller still has the hex
+
+
+def cmd_read(args) -> int:
+    """Typed reads: decode memory as an integer, C string, or struct."""
+    action = args.read_action
+    with _with_client(args) as client:
+        addr_value, _ = _parse_target(args.addr)
+        if addr_value is None:
+            raise SystemExit(f"Invalid address {args.addr!r}; expected hex (0x..) or decimal.")
+        lifted = _to_lifted_addr(client, addr_value)
+        endian = "big" if getattr(args, "endian", "little") == "big" else "little"
+
+        if action == "int":
+            size = args.size or (client.default_pointer_size or 8)
+            data = client.read_memory(lifted, size)
+            if data is None or len(data) < size:
+                raise SystemExit(
+                    f"Could not read {size} bytes at {_format_addr_hex(lifted)}."
+                )
+            value = int.from_bytes(data[:size], endian, signed=args.signed)
+            _emit(args, {
+                "addr": lifted, "size": size, "signed": bool(args.signed),
+                "endian": endian, "value": value,
+                "hex": "0x" + data[:size].hex(),
+            })
+            return EXIT_OK
+
+        if action == "string":
+            data = client.read_memory(lifted, args.max_len)
+            if data is None:
+                raise SystemExit(f"Could not read a string at {_format_addr_hex(lifted)}.")
+            nul = data.find(b"\x00")
+            raw = data[:nul] if nul != -1 else data
+            text = raw.decode(args.encoding, errors="replace")
+            _emit(args, {
+                "addr": lifted, "length": len(raw),
+                "truncated": nul == -1 and len(data) >= args.max_len,
+                "string": text,
+            }, text_field="string")
+            return EXIT_OK
+
+        if action == "struct":
+            try:
+                struct = client.structs[args.name]
+            except KeyError:
+                raise SystemExit(
+                    f"Struct {args.name!r} is not defined. Define it with "
+                    f"`create-type` first, or check the name."
+                )
+            size = struct.size or 0
+            if not size and struct.members:
+                size = max((off + (m.size or 0)) for off, m in struct.members.items())
+            if not size:
+                raise SystemExit(f"Struct {args.name!r} has zero size; nothing to read.")
+            data = client.read_memory(lifted, size)
+            if data is None:
+                raise SystemExit(
+                    f"Could not read {size} bytes for struct {args.name!r} at "
+                    f"{_format_addr_hex(lifted)}."
+                )
+            members = []
+            for off in sorted(struct.members):
+                m = struct.members[off]
+                msize = m.size or 0
+                chunk = data[off:off + msize] if msize else b""
+                members.append({
+                    "offset": off, "name": m.name, "type": m.type, "size": msize,
+                    "hex": chunk.hex(), "value": _decode_scalar(m.type, chunk, endian),
+                })
+            if args.json:
+                _emit(args, {"addr": lifted, "struct": args.name, "size": size, "members": members})
+            else:
+                print(f"struct {args.name} @ {_format_addr_hex(lifted)} (size {size}):")
+                for m in members:
+                    val = "" if m["value"] is None else f" = {m['value']}"
+                    print(f"  +0x{m['offset']:<4x} {str(m['name'] or ''):<16} "
+                          f"{str(m['type'] or ''):<18}{val}  ({m['hex']})")
+            return EXIT_OK
+
+        raise SystemExit(f"Unknown read action: {action}")
 
 
 def _hexdump(data: bytes, *, base_addr: int = 0, width: int = 16) -> List[str]:
@@ -1786,6 +1891,42 @@ def build_parser() -> argparse.ArgumentParser:
     _add_server_filter_args(p_gc)
     _add_output_args(p_gc)
     p_gc.set_defaults(func=cmd_get_callers)
+
+    # read (typed)
+    p_read = sub.add_parser(
+        "read",
+        help="Typed reads: decode memory as an integer, C string, or struct.",
+    )
+    read_sub = p_read.add_subparsers(dest="read_action", required=True)
+
+    p_rint = read_sub.add_parser("int", help="Read and decode an integer.")
+    p_rint.add_argument("addr", help="Address (hex 0x.., decimal, lifted or absolute).")
+    p_rint.add_argument("--size", type=lambda x: int(x, 0), default=None,
+                        help="Byte width (default: pointer size).")
+    p_rint.add_argument("--signed", action="store_true", help="Decode as signed.")
+    p_rint.add_argument("--endian", choices=("little", "big"), default="little",
+                        help="Byte order (default: little).")
+    _add_server_filter_args(p_rint)
+    _add_output_args(p_rint)
+    p_rint.set_defaults(func=cmd_read)
+
+    p_rstr = read_sub.add_parser("string", help="Read a NUL-terminated C string.")
+    p_rstr.add_argument("addr", help="Address of the string.")
+    p_rstr.add_argument("--max-len", dest="max_len", type=lambda x: int(x, 0), default=256,
+                        help="Maximum bytes to read (default: 256).")
+    p_rstr.add_argument("--encoding", default="utf-8", help="Text encoding (default: utf-8).")
+    _add_server_filter_args(p_rstr)
+    _add_output_args(p_rstr)
+    p_rstr.set_defaults(func=cmd_read)
+
+    p_rstruct = read_sub.add_parser("struct", help="Read and decode a defined struct.")
+    p_rstruct.add_argument("addr", help="Address of the struct instance.")
+    p_rstruct.add_argument("name", help="Name of a defined struct (see `create-type`).")
+    p_rstruct.add_argument("--endian", choices=("little", "big"), default="little",
+                          help="Byte order for member decoding (default: little).")
+    _add_server_filter_args(p_rstruct)
+    _add_output_args(p_rstruct)
+    p_rstruct.set_defaults(func=cmd_read)
 
     # read_memory
     p_rm = sub.add_parser(
