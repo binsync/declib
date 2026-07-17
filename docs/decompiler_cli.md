@@ -180,10 +180,36 @@ ID           BACKEND  PID      BINARY
 Stop one or all servers.
 
 ```bash
-decompiler stop [--id SERVER_ID] [--binary PATH] [--all] [--json]
+decompiler stop [--id SERVER_ID] [--binary PATH] [--all] [--save | --discard] [--json]
 ```
 
-You must pass one of `--id`, `--binary`, or `--all`.
+You must pass one of `--id`, `--binary`, or `--all`. By default the backend's
+native teardown applies (IDA discards, Ghidra persists). Pass `--save` to flush
+analysis to disk first (durable across a reload), or `--discard` to explicitly
+drop unsaved edits. `--save` and `--discard` are mutually exclusive.
+
+### `save`
+
+Persist the backend's analysis to disk so renames, retypes, and comments
+survive a `stop` + reload of the same `--project-dir`.
+
+```bash
+decompiler save [--path PATH] [--id ID] [--binary PATH] [--backend BACKEND] [--json]
+```
+
+Each backend writes its native artifact: IDA a `.i64`/`.idb`, Ghidra its
+project, Binary Ninja a `.bndb`. `angr` is purely in-memory and has nothing to
+persist — `save` exits `2` (`not implemented`) there. On reload, DecLib reopens
+the saved database (IDA does so without re-analysis), so prior work is intact.
+
+```bash
+decompiler load ./fauxware --backend ida --project-dir ./proj
+decompiler rename func authenticate auth_check
+decompiler save                       # {"saved": true, "path": null}
+decompiler stop --id <id>
+decompiler load ./fauxware --backend ida --project-dir ./proj  # reopens saved .i64
+decompiler list_functions --filter auth_check   # rename survived
+```
 
 ### `list_functions`
 
@@ -421,9 +447,10 @@ Every CLI command uses these exit codes:
 | Code | Meaning |
 |---|---|
 | `0` | Success. |
-| `1` | User-visible error — target not found, rename didn't apply, decompile failed, etc. All failure modes unify to `1` so that shell `&&` chaining works cleanly. |
+| `1` | User-visible error — target not found, rename didn't apply, decompile failed, etc. Most failure modes unify to `1` so that shell `&&` chaining works cleanly. |
+| `2` | The requested capability is **not implemented for the selected backend** (e.g. `save` on angr). Distinct from `1` so scripts can branch on "unsupported" vs "failed". |
 
-Argparse-level errors (unknown subcommand, missing required argument) exit
+Argparse-level errors (unknown subcommand, missing required argument) also exit
 with Python's standard argparse code `2`.
 
 ---

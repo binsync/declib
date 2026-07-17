@@ -437,6 +437,8 @@ class DecompilerClient:
                         raise ValueError(error_msg)
                     elif error_type == "AttributeError":
                         raise AttributeError(error_msg)
+                    elif error_type == "NotImplementedError":
+                        raise NotImplementedError(error_msg)
                     else:
                         raise RuntimeError(f"{error_type}: {error_msg}")
                 
@@ -562,6 +564,14 @@ class DecompilerClient:
     def read_memory(self, addr: int, size: int) -> Optional[bytes]:
         """Read raw bytes from the loaded program."""
         return self._send_request({"type": "method_call", "method_name": "read_memory", "args": [addr, size]})
+
+    def save(self, path: Optional[str] = None) -> bool:
+        """Persist the backend's analysis to disk. Raises NotImplementedError for in-memory backends."""
+        return self._send_request({"type": "method_call", "method_name": "save", "args": [path]})
+
+    def set_persist_on_close(self, value: bool) -> bool:
+        """Control whether the backend flushes to disk on teardown."""
+        return self._send_request({"type": "method_call", "method_name": "set_persist_on_close", "args": [value]})
     
     def get_callgraph(self, only_names=False):
         """Get the call graph"""

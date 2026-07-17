@@ -9,7 +9,8 @@ via the shared server registry (see declib.api.server_registry).
 Subcommands implemented:
 - load            start a server on a binary
 - list            list running servers
-- stop            stop one or all servers
+- stop            stop one or all servers (with --save/--discard)
+- save            persist backend analysis to disk (durable artifacts)
 - list_functions  list functions in the binary, optionally filtered by regex
 - decompile       decompile a function by name or address
 - disassemble     disassemble a function by name or address
@@ -43,6 +44,7 @@ EXIT_OK = 0
 EXIT_USER_ERROR = 1        # user asked for something that didn't happen
 EXIT_NOT_FOUND = 1         # missing function/name/binary
 EXIT_RUNTIME_ERROR = 1     # unhandled/unknown failure
+EXIT_UNSUPPORTED = 2       # feature not implemented for the selected backend
 
 from declib.api import server_registry
 from declib.decompilers import SUPPORTED_DECOMPILERS
@@ -310,12 +312,17 @@ def cmd_list(args) -> int:
     return 0
 
 
-def _stop_server_by_record(record: Dict) -> bool:
+def _stop_server_by_record(record: Dict, save_mode: Optional[str] = None) -> bool:
     """Shut down the server process backing `record`.
 
     Asks the server to shut itself down gracefully, falling back to SIGTERM/SIGKILL
     on the PID if the request fails. Returns True if we believe the process is
     gone (or never existed) by the time we return.
+
+    ``save_mode`` controls the final flush to disk before teardown:
+    - ``"save"``    — persist analysis (``client.save()``) first.
+    - ``"discard"`` — tell the backend not to persist on close.
+    - ``None``      — leave the backend's default behavior alone.
     """
     from declib.api.decompiler_client import DecompilerClient
 
@@ -329,6 +336,18 @@ def _stop_server_by_record(record: Dict) -> bool:
         _l.warning("Could not connect to server %s: %s", server_id, exc)
         client = None
     if client is not None:
+        if save_mode == "save":
+            try:
+                client.save()
+            except NotImplementedError:
+                _l.debug("Backend %s does not support saving; nothing to flush.", server_id)
+            except Exception as exc:
+                _l.warning("save before stop failed for %s: %s", server_id, exc)
+        elif save_mode == "discard":
+            try:
+                client.set_persist_on_close(False)
+            except Exception as exc:
+                _l.debug("set_persist_on_close(False) failed for %s: %s", server_id, exc)
         try:
             client._send_request({"type": "shutdown_server"})
             graceful = True
@@ -381,6 +400,8 @@ def _wait_for_process_exit(pid, timeout: float) -> bool:
 
 
 def cmd_stop(args) -> int:
+    if args.save and args.discard:
+        raise SystemExit("decompiler stop: --save and --discard are mutually exclusive")
     records = server_registry.list_servers()
     if args.all:
         targets = records
@@ -394,12 +415,30 @@ def cmd_stop(args) -> int:
     if not targets:
         raise SystemExit("No matching server to stop")
 
+    save_mode = "save" if args.save else "discard" if args.discard else None
+
     results = []
     for record in targets:
-        ok = _stop_server_by_record(record)
-        results.append({"id": record.get("id"), "stopped": bool(ok)})
+        ok = _stop_server_by_record(record, save_mode=save_mode)
+        results.append({"id": record.get("id"), "stopped": bool(ok), "save_mode": save_mode})
     _emit(args, {"stopped": results})
     return 0
+
+
+def cmd_save(args) -> int:
+    """Persist the selected server's analysis to its on-disk database/project."""
+    with _with_client(args) as client:
+        try:
+            ok = bool(client.save(args.path))
+        except NotImplementedError as exc:
+            # Re-raise so main() renders the friendly "not implemented" message
+            # and returns EXIT_UNSUPPORTED.
+            raise NotImplementedError(
+                str(exc) or "this backend has no persistent database to save "
+                "(e.g. angr is purely in-memory)."
+            )
+        _emit(args, {"saved": ok, "path": args.path})
+        return EXIT_OK if ok else EXIT_USER_ERROR
 
 
 # ---------------------------------------------------------------------------
@@ -1289,8 +1328,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_stop.add_argument("--id", dest="id", help="Server ID to stop.")
     p_stop.add_argument("--binary", dest="binary", help="Stop servers for this binary.")
     p_stop.add_argument("--all", action="store_true", help="Stop every running server.")
+    p_stop.add_argument("--save", action="store_true",
+                        help="Persist analysis to disk before stopping (durable .i64/.gpr/.bndb).")
+    p_stop.add_argument("--discard", action="store_true",
+                        help="Explicitly drop unsaved edits on stop (default for IDA; overrides Ghidra's save-on-close).")
     _add_output_args(p_stop)
     p_stop.set_defaults(func=cmd_stop)
+
+    # save
+    p_save = sub.add_parser(
+        "save",
+        help=(
+            "Persist the backend's analysis to disk so renames/types/comments "
+            "survive a stop + reload. IDA writes its .i64, Ghidra saves the "
+            "project, Binary Ninja writes a .bndb; angr (in-memory) is unsupported."
+        ),
+    )
+    p_save.add_argument("--path", dest="path", default=None,
+                        help="Explicit output path (backend-dependent; defaults to the open database).")
+    _add_server_filter_args(p_save)
+    _add_output_args(p_save)
+    p_save.set_defaults(func=cmd_save)
 
     # decompile
     p_dec = sub.add_parser("decompile", help="Decompile a function by name or address.")
@@ -1477,6 +1535,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         return args.func(args) or EXIT_OK
     except SystemExit:
         raise
+    except NotImplementedError as exc:
+        # A backend that doesn't implement the requested capability. Surface a
+        # clean, distinct message + exit code so scripts can tell "unsupported
+        # on this backend" apart from a genuine failure.
+        msg = str(exc) or "not implemented for this backend"
+        print(f"not implemented: {msg}", file=sys.stderr)
+        return EXIT_UNSUPPORTED
     except Exception as exc:  # noqa: BLE001
         _l.exception("Unhandled error: %s", exc)
         print(f"Error: {exc}", file=sys.stderr)

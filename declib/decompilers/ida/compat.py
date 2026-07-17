@@ -1831,6 +1831,26 @@ def wait_for_idc_initialization():
     idc.auto_wait()
 
 
+@execute_write
+def save_database(path=None):
+    """Flush the in-memory IDB to disk.
+
+    idalib opens the database in memory and (by default) discards it on
+    ``close_database(False)``; this writes it out so renames/types/comments
+    become a durable ``.i64``/``.idb`` artifact. With no ``path`` we save to
+    whatever database file IDA already has open (honoring any ``-o`` redirect
+    from ``project_dir``). ``idc.save_database`` returns None on success, so we
+    treat "no exception" as success.
+    """
+    target = path or idc.get_idb_path() or ""
+    try:
+        idc.save_database(target, 0)
+    except Exception as e:
+        _l.warning("save_database failed for %r: %s", target, e)
+        return False
+    return True
+
+
 def initialize_decompiler():
     return bool(ida_hexrays.init_hexrays_plugin())
 
