@@ -324,6 +324,35 @@ decompiler rename var <old_var_name> <new_var_name> --function <func_name_or_add
 The CLI exits `1` if the rename didn't actually change anything (the
 response's `success` field is authoritative).
 
+### `comment`
+
+Get, set, append, delete, or list comments (annotations), keyed by address.
+
+```bash
+decompiler comment set <addr> <text> [--decompiled] [--id ID] [--json]
+decompiler comment append <addr> <text> [--decompiled] [--id ID] [--json]
+decompiler comment get <addr> [--id ID] [--json]
+decompiler comment delete <addr> [--id ID] [--json]
+decompiler comment list [--filter REGEX] [--id ID] [--json]
+```
+
+`--decompiled` attaches the comment to the decompiler/pseudocode view instead
+of the disassembly. `set` replaces any existing comment; `append` concatenates.
+`get` exits `1` when there is no comment at the address.
+
+```bash
+decompiler comment set 0x71d "parses argv, calls authenticate"
+decompiler comment append 0x71d "SOSNEAKY is the backdoor password"
+decompiler comment get 0x71d
+# {"addr": 1821, "decompiled": false, "comment": "parses argv, calls authenticate\nSOSNEAKY is the backdoor password", "addr_hex": "0x71d"}
+decompiler comment list --filter backdoor --json
+```
+
+Backend notes: IDA accepts comments only at addresses **inside a function**;
+Ghidra and Binary Ninja are more permissive. `angr` implements comment writes
+but not reads/enumeration, so `get`/`list` return nothing there. Use `save`
+(or `stop --save`) to persist comments across a reload.
+
 ### `list_strings`
 
 List strings the decompiler's own string detector has identified in the

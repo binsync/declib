@@ -459,6 +459,81 @@ class _CLIBackendTestBase(unittest.TestCase):
         self.assertIn("mutually exclusive", result.stdout + result.stderr)
 
     # -------------------------------------------------------------------
+    # comment CRUD
+    # -------------------------------------------------------------------
+
+    #: Backends that can read comments back (angr only implements set today).
+    _reads_comments: bool = True
+
+    def _main_start_addr(self):
+        """Lifted start address of fauxware's main across backends."""
+        entries = json.loads(_run_cli("list_functions", "--json").stdout)
+        for e in entries:
+            if e.get("name") in ("main", "_main"):
+                return e["addr"]
+        for e in entries:
+            if e.get("addr") == 0x71d:
+                return e["addr"]
+        self.fail("couldn't find main for comment test")
+
+    def test_comment_set_get(self):
+        self._load_fauxware_isolated()
+        addr = self._main_start_addr()
+        text = "declib annotated this"
+        setr = _run_cli("comment", "set", _format_hex(addr), text, "--json", check=False)
+        if setr.returncode != 0:
+            self.skipTest(f"{self.backend}: comment set unsupported here: {setr.stdout + setr.stderr}")
+        self.assertTrue(json.loads(setr.stdout)["success"])
+
+        if not self._reads_comments:
+            self.skipTest(f"{self.backend} does not implement comment reads")
+        got = _run_cli("comment", "get", _format_hex(addr), "--json")
+        self.assertIn(text, json.loads(got.stdout)["comment"],
+                      f"{self.backend}: comment get did not return the set text")
+
+    def test_comment_append(self):
+        if not self._reads_comments:
+            self.skipTest(f"{self.backend} does not implement comment reads")
+        self._load_fauxware_isolated()
+        addr = self._main_start_addr()
+        first = _run_cli("comment", "set", _format_hex(addr), "first line", "--json", check=False)
+        if first.returncode != 0:
+            self.skipTest(f"{self.backend}: comment set unsupported here")
+        _run_cli("comment", "append", _format_hex(addr), "second line", "--json")
+        got = json.loads(_run_cli("comment", "get", _format_hex(addr), "--json").stdout)
+        self.assertIn("first line", got["comment"])
+        self.assertIn("second line", got["comment"])
+
+    def test_comment_list_and_delete(self):
+        if not self._reads_comments:
+            self.skipTest(f"{self.backend} does not implement comment reads")
+        self._load_fauxware_isolated()
+        addr = self._main_start_addr()
+        marker = "UNIQUE_COMMENT_MARKER_XYZ"
+        setr = _run_cli("comment", "set", _format_hex(addr), marker, "--json", check=False)
+        if setr.returncode != 0:
+            self.skipTest(f"{self.backend}: comment set unsupported here")
+
+        listing = json.loads(_run_cli("comment", "list", "--filter", marker, "--json").stdout)
+        self.assertTrue(any(marker in e["comment"] for e in listing),
+                        f"{self.backend}: set comment not enumerated by `comment list`")
+
+        deleted = _run_cli("comment", "delete", _format_hex(addr), "--json")
+        self.assertTrue(json.loads(deleted.stdout)["deleted"])
+        after = _run_cli("comment", "get", _format_hex(addr), check=False)
+        self.assertNotEqual(after.returncode, 0,
+                            f"{self.backend}: comment still present after delete")
+
+    def test_comment_get_missing_exits_nonzero(self):
+        self._load_fauxware_isolated()
+        addr = self._main_start_addr()
+        # Clear anything at main's entry, then a get there must report "missing".
+        # (Deterministic across backends without depending on auto-comment layout.)
+        _run_cli("comment", "delete", _format_hex(addr), check=False)
+        result = _run_cli("comment", "get", _format_hex(addr), check=False)
+        self.assertNotEqual(result.returncode, 0)
+
+    # -------------------------------------------------------------------
     # create-type / retype (run against every backend)
     # -------------------------------------------------------------------
 
@@ -552,6 +627,8 @@ class _CLIBackendTestBase(unittest.TestCase):
 class TestDecompilerCLIAngr(_CLIBackendTestBase):
     """angr backend: always available (pure-Python dependency)."""
     backend = "angr"
+    # angr implements comment *writes* but not reads/enumeration yet.
+    _reads_comments = False
 
     # angr-specific sanity checks that don't map cleanly to the other
     # backends live here.

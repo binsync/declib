@@ -16,6 +16,7 @@ Subcommands implemented:
 - disassemble     disassemble a function by name or address
 - xref_to         data + code references to a target
 - xref_from       things a function calls (callees)
+- comment         get/set/append/delete/list comments (annotations)
 - rename          rename a function or local variable
 - create-type     define a new struct/enum/typedef from a C string
 - retype          change the type of a function's variable or argument
@@ -115,6 +116,28 @@ def _resolve_function_addr(client, target: str) -> Optional[int]:
     if base and (addr + base) in known:
         return addr + base
     return addr  # let the caller raise if it's truly invalid
+
+
+def _to_lifted_addr(client, addr: int) -> int:
+    """Best-effort: normalize an absolute address into the server's lifted form.
+
+    The server keys artifacts (comments, patches, ...) by lifted address —
+    relative to the image base. Users routinely paste absolute addresses, so
+    when the value is clearly absolute (>= base and not already a known lifted
+    function start) we subtract the base to land it where they expect.
+    """
+    try:
+        if addr in set(client.functions.keys()):
+            return addr
+    except Exception:
+        pass
+    try:
+        base = client.binary_base_addr
+    except Exception:
+        base = 0
+    if base and addr >= base:
+        return addr - base
+    return addr
 
 
 def _select_server(
@@ -767,6 +790,88 @@ def cmd_rename(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# comment (get / set / append / delete / list)
+# ---------------------------------------------------------------------------
+
+def cmd_comment(args) -> int:
+    """CRUD for comments/annotations, keyed by address.
+
+    ``set`` replaces, ``append`` concatenates onto whatever is already there,
+    ``get``/``delete`` operate on a single address, and ``list`` enumerates
+    every comment the backend knows about (optionally regex-filtered).
+    """
+    from declib.artifacts import Comment
+
+    action = args.comment_action
+    with _with_client(args) as client:
+        if action == "list":
+            pattern = re.compile(args.filter) if args.filter else None
+            entries: List[Dict] = []
+            for addr, cmt in sorted(client.comments.items(), key=lambda kv: kv[0]):
+                text = getattr(cmt, "comment", None) or ""
+                if pattern and not pattern.search(text):
+                    continue
+                entries.append({
+                    "addr": addr,
+                    "decompiled": bool(getattr(cmt, "decompiled", False)),
+                    "comment": text,
+                })
+            if args.json:
+                _emit_list(args, entries)
+            else:
+                if not entries:
+                    print("No comments.")
+                    return EXIT_OK
+                for e in entries:
+                    print(f"{_format_addr_hex(e['addr'])}\t{e['comment']}")
+            return EXIT_OK
+
+        addr_value, _ = _parse_target(args.addr)
+        if addr_value is None:
+            raise SystemExit(f"Invalid address {args.addr!r}; expected hex (0x..) or decimal.")
+        lifted = _to_lifted_addr(client, addr_value)
+
+        if action == "get":
+            cmt = client.get_comment(lifted)
+            if cmt is None:
+                raise SystemExit(f"No comment at {_format_addr_hex(lifted)}")
+            _emit(args, {
+                "addr": lifted,
+                "decompiled": bool(getattr(cmt, "decompiled", False)),
+                "comment": cmt.comment,
+            }, text_field="comment")
+            return EXIT_OK
+
+        if action == "delete":
+            ok = bool(client.delete_comment(lifted))
+            _emit(args, {"addr": lifted, "deleted": ok})
+            return EXIT_OK if ok else EXIT_USER_ERROR
+
+        # set / append
+        new_text = args.text
+        if action == "append":
+            existing = client.get_comment(lifted)
+            if existing is not None and existing.comment:
+                new_text = f"{existing.comment}\n{new_text}"
+
+        comment = Comment(addr=lifted, comment=new_text, decompiled=bool(args.decompiled))
+        ok = bool(client.set_artifact(comment))
+        if not ok:
+            raise SystemExit(
+                f"Backend rejected the comment at {_format_addr_hex(lifted)}. "
+                "Some backends (IDA) only accept comments at addresses inside a "
+                "function — check the address with `list_functions`/`disassemble`."
+            )
+        _emit(args, {
+            "addr": lifted,
+            "decompiled": bool(args.decompiled),
+            "comment": new_text,
+            "success": ok,
+        })
+        return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
 # create-type / retype
 # ---------------------------------------------------------------------------
 
@@ -1399,6 +1504,36 @@ def build_parser() -> argparse.ArgumentParser:
     _add_server_filter_args(p_ren)
     _add_output_args(p_ren)
     p_ren.set_defaults(func=cmd_rename)
+
+    # comment
+    p_cmt = sub.add_parser(
+        "comment",
+        help="Get/set/append/delete/list comments (annotations) by address.",
+    )
+    cmt_sub = p_cmt.add_subparsers(dest="comment_action", required=True)
+
+    def _add_comment_addr_action(name, help_text, with_text=False):
+        p = cmt_sub.add_parser(name, help=help_text)
+        p.add_argument("addr", help="Address (hex 0x.., decimal, lifted or absolute).")
+        if with_text:
+            p.add_argument("text", help="Comment text.")
+            p.add_argument("--decompiled", action="store_true",
+                           help="Attach to the decompiler view (pseudocode) rather than disassembly.")
+        _add_server_filter_args(p)
+        _add_output_args(p)
+        p.set_defaults(func=cmd_comment)
+        return p
+
+    _add_comment_addr_action("set", "Set a comment at an address (replaces existing).", with_text=True)
+    _add_comment_addr_action("append", "Append text to the comment at an address.", with_text=True)
+    _add_comment_addr_action("get", "Print the comment at an address.")
+    _add_comment_addr_action("delete", "Delete any comment at an address.")
+
+    p_clist = cmt_sub.add_parser("list", help="List every comment in the binary.")
+    p_clist.add_argument("--filter", dest="filter", help="Regex to filter comment text.")
+    _add_server_filter_args(p_clist)
+    _add_output_args(p_clist)
+    p_clist.set_defaults(func=cmd_comment)
 
     # create-type
     p_ct = sub.add_parser(

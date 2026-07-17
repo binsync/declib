@@ -655,6 +655,19 @@ class BinjaInterface(DecompilerInterface):
         # func exists for commenting
         bn_func = self.addr_to_bn_func(self.bv, comment.addr)
         bn_func.set_comment_at(comment.addr, comment.comment)
+        return True
+
+    def _del_comment(self, addr) -> bool:
+        """Clear any comment at ``addr`` (function-local and address-space)."""
+        removed = False
+        if self.bv.get_comment_at(addr):
+            self.bv.set_comment_at(addr, "")
+            removed = True
+        for bn_func in self.bv.get_functions_containing(addr) or []:
+            if bn_func.get_comment_at(addr):
+                bn_func.set_comment_at(addr, "")
+                removed = True
+        return removed
 
     def _get_comment(self, addr) -> Optional[Comment]:
         non_func_cmt = self.bv.get_comment_at(addr)
@@ -686,7 +699,13 @@ class BinjaInterface(DecompilerInterface):
             if not bn_func.symbol.type in VALID_FUNC_SYM_TYPES:
                 continue
 
-            comments.update(bn_func.comments)
+            for cmt_addr, cmt_text in bn_func.comments.items():
+                if not cmt_text:
+                    continue
+                comments[cmt_addr] = Comment(
+                    addr=cmt_addr, comment=cmt_text,
+                    func_addr=bn_func.start, decompiled=True,
+                )
 
         # TODO: show non-function based comments
         return comments
