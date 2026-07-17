@@ -358,6 +358,30 @@ class BinjaInterface(DecompilerInterface):
             return None
         return bytes(data)
 
+    def search_bytes(self, pattern: bytes, max_results: int = 100) -> List[int]:
+        results = []
+        try:
+            for match in self.bv.find_all_data(self.bv.start, self.bv.end, pattern):
+                # find_all_data yields (addr, DataBuffer); older versions yield addr.
+                addr = match[0] if isinstance(match, (tuple, list)) else match
+                results.append(self.art_lifter.lift_addr(int(addr)))
+                if len(results) >= max_results:
+                    break
+        except Exception as e:
+            l.warning("Binary Ninja find_all_data failed: %s", e)
+        return results
+
+    def list_imports(self) -> List[tuple]:
+        out = []
+        try:
+            syms = self.bv.get_symbols_of_type(SymbolType.ImportedFunctionSymbol) or []
+        except Exception as e:
+            l.warning("Binary Ninja import listing failed: %s", e)
+            return out
+        for sym in syms:
+            out.append((self.art_lifter.lift_addr(int(sym.address)), str(sym.name), ""))
+        return out
+
     def start_artifact_watchers(self):
         if not self.artifact_watchers_started:
             from .hooks import DataMonitor

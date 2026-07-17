@@ -245,6 +245,18 @@ class AngrInterface(DecompilerInterface):
             return None
         return bytes(data)
 
+    def list_imports(self) -> List[tuple]:
+        out = []
+        try:
+            imports = self.main_instance.project.loader.main_object.imports
+        except Exception:
+            return out
+        for name, reloc in imports.items():
+            addr = getattr(reloc, "rebased_addr", 0) or 0
+            lifted = self.art_lifter.lift_addr(addr) if addr else 0
+            out.append((lifted, str(name), ""))
+        return out
+
     def disassemble(self, addr: int, **kwargs) -> Optional[str]:
         lowered = self.art_lifter.lower_addr(addr)
         func = self.main_instance.project.kb.functions.get(lowered, None)

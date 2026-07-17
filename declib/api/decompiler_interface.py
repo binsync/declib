@@ -621,6 +621,23 @@ class DecompilerInterface:
         self.persist_on_close = bool(value)
         return True
 
+    def search_bytes(self, pattern: bytes, max_results: int = 100) -> List[int]:
+        """Return lifted addresses where the raw byte ``pattern`` occurs.
+
+        Subclasses with a native byte-search API override this. The base
+        raises ``NotImplementedError`` so the CLI can report the capability as
+        unsupported for backends (e.g. angr) that lack one.
+        """
+        raise NotImplementedError("Byte search is not implemented for this backend.")
+
+    def list_imports(self) -> List[Tuple[int, str, str]]:
+        """Return ``(lifted_addr, name, library)`` tuples for imported symbols.
+
+        Subclasses override with a native import enumeration. The base raises
+        ``NotImplementedError``.
+        """
+        raise NotImplementedError("Import listing is not implemented for this backend.")
+
     def get_callgraph(self, only_names=False) -> nx.DiGraph:
         """
         Returns the callgraph of the binary. This is a dict of function addresses to a list of function addresses

@@ -351,6 +351,64 @@ class _CLIBackendTestBase(unittest.TestCase):
         self.assertNotIn("|.ELF", combined)
 
     # -------------------------------------------------------------------
+    # search + imports
+    # -------------------------------------------------------------------
+
+    #: Backends with a native byte-search API (angr has none).
+    _searches_bytes: bool = True
+    #: Backends that enumerate imports.
+    _lists_imports: bool = True
+
+    def test_search_bytes_elf_magic(self):
+        if not self._searches_bytes:
+            self.skipTest(f"{self.backend} has no byte-search API")
+        self._load_fauxware_isolated()
+        result = _run_cli("search", "bytes", "7f454c46", "--json", check=False)
+        if result.returncode == 2:
+            self.skipTest(f"{self.backend}: search bytes unsupported")
+        payload = json.loads(result.stdout)
+        self.assertGreaterEqual(payload["count"], 1,
+                                f"{self.backend}: ELF magic not found by search bytes")
+        # The ELF magic sits at the image base -> lifted 0x0.
+        addrs = {m["addr"] for m in payload["matches"]}
+        self.assertIn(0, addrs, f"{self.backend}: expected a match at lifted 0x0: {addrs}")
+
+    def test_search_string(self):
+        if not self._searches_bytes:
+            self.skipTest(f"{self.backend} has no byte-search API")
+        self._load_fauxware_isolated()
+        result = _run_cli("search", "string", "SOSNEAKY", "--json", check=False)
+        if result.returncode == 2:
+            self.skipTest(f"{self.backend}: search string unsupported")
+        payload = json.loads(result.stdout)
+        self.assertGreaterEqual(payload["count"], 1,
+                                f"{self.backend}: 'SOSNEAKY' not found in memory")
+
+    def test_search_instruction(self):
+        """Instruction search is client-side (disasm grep) — works on all backends."""
+        self._load_fauxware_isolated()
+        result = _run_cli("search", "instruction", r"call", "--max", "50", "--json")
+        payload = json.loads(result.stdout)
+        self.assertGreaterEqual(payload["count"], 1,
+                                f"{self.backend}: no 'call' instructions found")
+        for m in payload["matches"]:
+            self.assertIn("call", m["line"].lower())
+
+    def test_imports_list(self):
+        if not self._lists_imports:
+            self.skipTest(f"{self.backend} does not enumerate imports")
+        self._load_fauxware_isolated()
+        result = _run_cli("imports", "--json", check=False)
+        if result.returncode == 2:
+            self.skipTest(f"{self.backend}: imports unsupported")
+        entries = json.loads(result.stdout)
+        names = {e["name"] for e in entries}
+        # fauxware imports libc functions; at least one of these is always present.
+        self.assertTrue(any(n and any(k in n for k in ("puts", "read", "printf", "strcmp"))
+                            for n in names),
+                        f"{self.backend}: expected a libc import in {names}")
+
+    # -------------------------------------------------------------------
     # typed reads + address semantics
     # -------------------------------------------------------------------
 
@@ -770,6 +828,9 @@ class TestDecompilerCLIAngr(_CLIBackendTestBase):
     _reads_globals = False
     # angr's signature set applies argument names but not types/return type.
     _sets_signature_types = False
+    # angr has no native byte-search API (instruction search still works —
+    # it's client-side). It does enumerate imports via the cle loader.
+    _searches_bytes = False
 
     # angr-specific sanity checks that don't map cleanly to the other
     # backends live here.

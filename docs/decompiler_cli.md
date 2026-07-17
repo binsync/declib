@@ -439,6 +439,30 @@ decompiler get_callers <target> [--id ID] [--binary PATH] [--backend BACKEND] [-
 Unlike `xref_to`, this never returns globals or other data refs. Rows are
 always of kind `Function`.
 
+### `search` and `imports`
+
+Find byte/string/instruction patterns and enumerate imported symbols.
+
+```bash
+decompiler search bytes <hex> [--max N] [--id ID] [--json]
+decompiler search string <text> [--encoding ENC] [--max N] [--json]
+decompiler search instruction <regex> [--max N] [--json]
+decompiler imports [--filter REGEX] [--id ID] [--json]
+```
+
+```bash
+decompiler search bytes "7f454c46"          # -> 0x0 (ELF magic at the base)
+decompiler search string "SOSNEAKY"
+decompiler search instruction "call.*authenticate"
+decompiler imports --filter 'puts|read'
+```
+
+`search bytes`/`string` use each backend's native memory search (IDA, Ghidra,
+Binary Ninja); `angr` lacks one and returns exit `2`. `search instruction` is
+client-side (greps disassembly), so it works everywhere but disassembles as it
+goes — keep `--max` modest. `imports` is implemented on IDA, angr, and Binary
+Ninja; Ghidra returns `not implemented`.
+
 ### `read` (typed) and address semantics
 
 `read_memory` returns raw bytes; `read` decodes them. Decoding happens
