@@ -573,6 +573,10 @@ class DecompilerClient:
         """Return (lifted_addr, name, library) tuples for imported symbols."""
         return self._send_request({"type": "method_call", "method_name": "list_imports"})
 
+    def backend_eval(self, code: str, mode: str = "eval") -> Dict:
+        """UNSAFE: run arbitrary Python in the backend process. See the interface docstring."""
+        return self._send_request({"type": "method_call", "method_name": "backend_eval", "args": [code], "kwargs": {"mode": mode}})
+
     def define_function(self, addr: int) -> bool:
         """Create a function at ``addr`` (lifted)."""
         return self._send_request({"type": "method_call", "method_name": "define_function", "args": [addr]})

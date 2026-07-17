@@ -351,6 +351,51 @@ class _CLIBackendTestBase(unittest.TestCase):
         self.assertNotIn("|.ELF", combined)
 
     # -------------------------------------------------------------------
+    # eval / exec (backend scripting escape hatch)
+    # -------------------------------------------------------------------
+
+    def test_eval_expression(self):
+        self._load_fauxware_isolated()
+        result = _run_cli("eval", "1 + 2", "--json")
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["result"], "3")
+
+    def test_eval_has_backend_access(self):
+        """`deci` is bound and the backend is reachable from eval."""
+        self._load_fauxware_isolated()
+        result = _run_cli("eval", "len(list(deci.functions.keys())) > 0", "--json")
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"], f"{self.backend}: eval failed: {payload}")
+        self.assertEqual(payload["result"], "True")
+        # deci.name reflects the running backend.
+        name = _run_cli("eval", "deci.name", "--json")
+        self.assertIn(self.backend, json.loads(name.stdout)["result"])
+
+    def test_exec_captures_stdout(self):
+        self._load_fauxware_isolated()
+        result = _run_cli("exec", "print('hello from', deci.name)", "--json")
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertIn("hello from", payload["stdout"])
+        self.assertIn(self.backend, payload["stdout"])
+
+    def test_exec_result_variable(self):
+        self._load_fauxware_isolated()
+        result = _run_cli("exec", "result = 40 + 2", "--json")
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["result"], "42")
+
+    def test_eval_error_is_reported(self):
+        self._load_fauxware_isolated()
+        result = _run_cli("eval", "1/0", "--json", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertIn("ZeroDivisionError", payload["traceback"])
+
+    # -------------------------------------------------------------------
     # patching
     # -------------------------------------------------------------------
 

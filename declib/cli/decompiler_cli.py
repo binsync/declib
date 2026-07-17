@@ -22,6 +22,7 @@ Subcommands implemented:
 - define          define a function/code/data at an address
 - undefine        clear code/data at an address
 - patch           set/get/list/delete byte patches
+- eval / exec     UNSAFE: run Python in the backend process (escape hatch)
 - global          list/get/rename/retype global variables
 - signature       get/set a function's full signature (prototype)
 - rename          rename a function or local variable
@@ -1320,6 +1321,49 @@ def cmd_read_memory(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# eval / exec — UNSAFE backend scripting escape hatch
+# ---------------------------------------------------------------------------
+
+def _run_backend_script(args, code: str, mode: str) -> int:
+    with _with_client(args) as client:
+        res = client.backend_eval(code, mode=mode)
+        if not res.get("ok"):
+            if res.get("stdout"):
+                sys.stdout.write(res["stdout"])
+            print(res.get("traceback") or f"{mode} failed", file=sys.stderr)
+            if args.json:
+                _emit(args, res)
+            return EXIT_RUNTIME_ERROR
+        if args.json:
+            _emit(args, res)
+        else:
+            if res.get("stdout"):
+                sys.stdout.write(res["stdout"])
+            if res.get("result"):
+                print(res["result"])
+        return EXIT_OK
+
+
+def cmd_eval(args) -> int:
+    """UNSAFE: evaluate a Python expression inside the backend process."""
+    return _run_backend_script(args, args.expression, "eval")
+
+
+def cmd_exec(args) -> int:
+    """UNSAFE: execute Python code inside the backend process."""
+    if args.file:
+        try:
+            code = Path(args.file).read_text()
+        except OSError as exc:
+            raise SystemExit(f"Could not read {args.file!r}: {exc}")
+    else:
+        code = args.code
+    if not code:
+        raise SystemExit("Provide Python code as an argument or via --file.")
+    return _run_backend_script(args, code, "exec")
+
+
+# ---------------------------------------------------------------------------
 # patch (set / get / list / delete)
 # ---------------------------------------------------------------------------
 
@@ -2112,6 +2156,28 @@ def build_parser() -> argparse.ArgumentParser:
     _add_server_filter_args(p_gc)
     _add_output_args(p_gc)
     p_gc.set_defaults(func=cmd_get_callers)
+
+    # eval / exec (UNSAFE backend scripting)
+    p_eval = sub.add_parser(
+        "eval",
+        help="UNSAFE, backend-specific: evaluate a Python expression in the backend process.",
+    )
+    p_eval.add_argument("expression",
+                        help="Python expression; `deci` is the DecompilerInterface (idaapi, "
+                             "deci.flat_api, deci.project, deci.bv are reachable).")
+    _add_server_filter_args(p_eval)
+    _add_output_args(p_eval)
+    p_eval.set_defaults(func=cmd_eval)
+
+    p_exec = sub.add_parser(
+        "exec",
+        help="UNSAFE, backend-specific: execute Python code in the backend process.",
+    )
+    p_exec.add_argument("code", nargs="?", help="Python source (or use --file).")
+    p_exec.add_argument("--file", dest="file", help="Read Python source from a file instead.")
+    _add_server_filter_args(p_exec)
+    _add_output_args(p_exec)
+    p_exec.set_defaults(func=cmd_exec)
 
     # patch
     p_patch = sub.add_parser("patch", help="Apply, inspect, list, or revert byte patches.")

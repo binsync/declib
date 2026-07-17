@@ -159,6 +159,8 @@ same binary.
 | `patch set <addr> <hex>` | Patch bytes at an address. | same |
 | `patch get/delete <addr>` | Show or revert the patch at an address (IDA). | same |
 | `patch list` | List all byte patches (IDA). | same |
+| `eval "<expr>"` | **UNSAFE**: evaluate a Python expression in the backend process. | same |
+| `exec "<code>"` / `exec --file <p>` | **UNSAFE**: run Python in the backend process. | `--file`, same |
 | `read int/string/struct <addr> [...]` | Typed reads: decode memory as an integer, C string, or defined struct. | `--size`, `--signed`, `--endian`, `--max-len`, `--encoding`, same + `--json` |
 | `read_memory <addr> <size>` | Read raw bytes from the binary at `<addr>`. Default output is a hexdump. | `--format {hexdump,hex,raw}`, same + `--json` (base64-encoded bytes) |
 | `install-skill` | Install this file for Claude Code or Codex. | `--agent`, `--dest`, `--force`, `--json` |
@@ -243,6 +245,27 @@ saved database (IDA `.i64`, Ghidra project, Binary Ninja `.bndb`). `angr` is
 purely in-memory: `save` exits `2` (`not implemented`) and there is nothing to
 reload. IDA reopens the saved `.i64` directly (no re-analysis), so a reload after
 `save` is fast and lossless.
+
+### `eval` / `exec` — UNSAFE backend scripting (escape hatch)
+
+When the abstracted API doesn't cover what you need, drop to the backend's own
+Python. **This runs arbitrary code inside the backend process** — it is not
+portable and not sandboxed. `deci` is the live DecompilerInterface; the backend
+API is reachable through it (`idaapi` importable; `deci.flat_api` on Ghidra;
+`deci.project` on angr; `deci.bv` on Binary Ninja).
+
+```bash
+decompiler eval "deci.name"                              # -> 'ida'
+decompiler eval "len(list(deci.functions.keys()))"      # count functions
+decompiler exec "print(hex(deci.binary_base_addr))"     # captured stdout
+decompiler exec "result = [f.name for _,f in deci.functions.items()][:5]"
+decompiler exec --file ./my_ida_script.py               # run a whole script
+```
+
+`eval` returns the expression's `repr`; `exec` captures stdout and the value of
+a variable named `result`. On error, the CLI prints the traceback and exits
+non-zero. Prefer the first-class commands (`rename`, `retype`, `comment`, ...)
+when they exist — reach for `eval`/`exec` only for backend-specific gaps.
 
 ### `patch` — modify bytes
 
