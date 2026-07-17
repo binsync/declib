@@ -382,6 +382,43 @@ class BinjaInterface(DecompilerInterface):
             out.append((self.art_lifter.lift_addr(int(sym.address)), str(sym.name), ""))
         return out
 
+    def define_function(self, addr) -> bool:
+        lowered = self.art_lifter.lower_addr(addr)
+        self.bv.create_user_function(lowered)
+        self.bv.update_analysis_and_wait()
+        return self.bv.get_function_at(lowered) is not None
+
+    def define_code(self, addr) -> bool:
+        # Binary Ninja disassembles when it creates a function; treat as such.
+        return self.define_function(addr)
+
+    def define_data(self, addr, type_str=None, size=None) -> bool:
+        lowered = self.art_lifter.lower_addr(addr)
+        try:
+            if type_str:
+                parsed = self.bv.parse_type_string(type_str)[0]
+                self.bv.define_user_data_var(lowered, parsed)
+            else:
+                self.bv.define_user_data_var(lowered, "char")
+            return True
+        except Exception as e:
+            l.warning("Binary Ninja define_data failed: %s", e)
+            return False
+
+    def undefine(self, addr, size=1) -> bool:
+        lowered = self.art_lifter.lower_addr(addr)
+        removed = False
+        f = self.bv.get_function_at(lowered)
+        if f is not None:
+            self.bv.remove_user_function(f)
+            removed = True
+        try:
+            self.bv.undefine_user_data_var(lowered)
+            removed = True
+        except Exception:
+            pass
+        return removed
+
     def start_artifact_watchers(self):
         if not self.artifact_watchers_started:
             from .hooks import DataMonitor

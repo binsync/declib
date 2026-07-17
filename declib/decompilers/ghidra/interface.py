@@ -561,6 +561,52 @@ class GhidraDecompilerInterface(DecompilerInterface):
             start = found.add(1)
         return results
 
+    def define_function(self, addr) -> bool:
+        from .compat.transaction import Transaction
+        gaddr = self._to_gaddr(self.art_lifter.lower_addr(addr))
+        with Transaction(self.flat_api, msg="define_function"):
+            func = self.flat_api.createFunction(gaddr, None)
+        return func is not None
+
+    def define_code(self, addr) -> bool:
+        from .compat.transaction import Transaction
+        gaddr = self._to_gaddr(self.art_lifter.lower_addr(addr))
+        with Transaction(self.flat_api, msg="define_code"):
+            return bool(self.flat_api.disassemble(gaddr))
+
+    def define_data(self, addr, type_str=None, size=None) -> bool:
+        from .compat.transaction import Transaction
+        gaddr = self._to_gaddr(self.art_lifter.lower_addr(addr))
+        with Transaction(self.flat_api, msg="define_data"):
+            try:
+                if type_str:
+                    gtype = self.typestr_to_gtype(type_str)
+                    if gtype is None:
+                        return False
+                    from ghidra.program.model.data import DataUtilities
+                    DataUtilities.createData(
+                        self.currentProgram, gaddr, gtype, -1,
+                        DataUtilities.ClearDataMode.CLEAR_ALL_CONFLICT_DATA,
+                    )
+                    return True
+                from .compat.imports import ByteDataType
+                self.flat_api.createData(gaddr, ByteDataType.dataType)
+                return True
+            except Exception as exc:
+                self.warning(f"define_data failed: {exc}")
+                return False
+
+    def undefine(self, addr, size=1) -> bool:
+        from .compat.transaction import Transaction
+        gaddr = self._to_gaddr(self.art_lifter.lower_addr(addr))
+        with Transaction(self.flat_api, msg="undefine"):
+            fm = self.currentProgram.getFunctionManager()
+            if fm.getFunctionAt(gaddr) is not None:
+                fm.removeFunction(gaddr)
+            end = gaddr.add(max(1, size) - 1)
+            self.flat_api.clearListing(gaddr, end)
+        return True
+
     def read_memory(self, addr: int, size: int) -> Optional[bytes]:
         if size <= 0:
             return b""

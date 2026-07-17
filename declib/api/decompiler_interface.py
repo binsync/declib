@@ -630,6 +630,25 @@ class DecompilerInterface:
         """
         raise NotImplementedError("Byte search is not implemented for this backend.")
 
+    # ------------------------------------------------------------------
+    # Code/data repair (define / undefine)
+    # ------------------------------------------------------------------
+    def define_function(self, addr) -> bool:
+        """Create a function at ``addr`` (lifted). Repairs missed analysis."""
+        raise NotImplementedError("define_function is not implemented for this backend.")
+
+    def define_code(self, addr) -> bool:
+        """Turn the bytes at ``addr`` (lifted) into an instruction."""
+        raise NotImplementedError("define_code is not implemented for this backend.")
+
+    def define_data(self, addr, type_str: Optional[str] = None, size: Optional[int] = None) -> bool:
+        """Define data at ``addr`` (lifted), optionally with a C type."""
+        raise NotImplementedError("define_data is not implemented for this backend.")
+
+    def undefine(self, addr, size: int = 1) -> bool:
+        """Undefine code/data at ``addr`` (lifted). Removes a function if one starts here."""
+        raise NotImplementedError("undefine is not implemented for this backend.")
+
     def list_imports(self) -> List[Tuple[int, str, str]]:
         """Return ``(lifted_addr, name, library)`` tuples for imported symbols.
 

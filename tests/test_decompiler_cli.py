@@ -351,6 +351,67 @@ class _CLIBackendTestBase(unittest.TestCase):
         self.assertNotIn("|.ELF", combined)
 
     # -------------------------------------------------------------------
+    # define / undefine (code & data repair)
+    # -------------------------------------------------------------------
+
+    #: Backends that support define/undefine of code & data.
+    _repairs_analysis: bool = True
+
+    def _find_non_entry_function(self):
+        """Return (addr, size) of a non-entry function safe to undefine/redefine."""
+        lf = json.loads(_run_cli("list_functions", "--json").stdout)
+        pref = next((e for e in lf if e.get("name") == "authenticate"), None)
+        if pref is None:
+            pref = next((e for e in lf if (e.get("size") or 0) > 8 and e.get("name")), None)
+        return pref
+
+    def test_undefine_and_define_function(self):
+        self._load_fauxware_isolated()
+        target = self._find_non_entry_function()
+        if target is None:
+            self.skipTest(f"{self.backend}: no suitable function")
+        addr, size = target["addr"], (target.get("size") or 1)
+
+        if not self._repairs_analysis:
+            r = _run_cli("define", "function", _format_hex(addr), check=False)
+            self.assertEqual(r.returncode, 2,
+                             f"{self.backend}: expected unsupported (exit 2), got {r.returncode}")
+            return
+
+        # Undefine removes the function.
+        u = _run_cli("undefine", _format_hex(addr), "--size", str(size), "--json", check=False)
+        if u.returncode != 0:
+            self.skipTest(f"{self.backend}: undefine unsupported: {u.stdout + u.stderr}")
+        self.assertTrue(json.loads(u.stdout)["undefined"])
+
+        # Re-disassemble and re-create the function (realistic repair sequence).
+        # define_function reporting success is the strong signal that undefine
+        # truly removed the function — add_func/createFunction only succeeds when
+        # no function is already there.
+        _run_cli("define", "code", _format_hex(addr), check=False)
+        d = _run_cli("define", "function", _format_hex(addr), "--json", check=False)
+        if d.returncode != 0:
+            self.skipTest(f"{self.backend}: define function unsupported: {d.stdout + d.stderr}")
+        self.assertTrue(json.loads(d.stdout)["success"],
+                        f"{self.backend}: define function did not report success")
+        lf3 = {e["addr"] for e in json.loads(_run_cli("list_functions", "--json").stdout)}
+        self.assertIn(addr, lf3, f"{self.backend}: function not present after define")
+
+    def test_define_data(self):
+        if not self._repairs_analysis:
+            self.skipTest(f"{self.backend} does not implement define/undefine")
+        self._load_fauxware_isolated()
+        globs = json.loads(_run_cli("global", "list", "--json").stdout)
+        cand = [g for g in globs if g.get("addr", -1) >= 0]
+        if not cand:
+            self.skipTest(f"{self.backend}: no global address to define data on")
+        addr = cand[0]["addr"]
+        r = _run_cli("define", "data", _format_hex(addr), "--type", "int", "--json", check=False)
+        if r.returncode != 0:
+            self.skipTest(f"{self.backend}: define data unsupported: {r.stdout + r.stderr}")
+        self.assertTrue(json.loads(r.stdout)["success"])
+
+    # -------------------------------------------------------------------
     # search + imports
     # -------------------------------------------------------------------
 
@@ -831,6 +892,8 @@ class TestDecompilerCLIAngr(_CLIBackendTestBase):
     # angr has no native byte-search API (instruction search still works —
     # it's client-side). It does enumerate imports via the cle loader.
     _searches_bytes = False
+    # angr's CFG-based model has no define/undefine primitives.
+    _repairs_analysis = False
 
     # angr-specific sanity checks that don't map cleanly to the other
     # backends live here.

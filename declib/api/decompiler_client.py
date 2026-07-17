@@ -573,6 +573,22 @@ class DecompilerClient:
         """Return (lifted_addr, name, library) tuples for imported symbols."""
         return self._send_request({"type": "method_call", "method_name": "list_imports"})
 
+    def define_function(self, addr: int) -> bool:
+        """Create a function at ``addr`` (lifted)."""
+        return self._send_request({"type": "method_call", "method_name": "define_function", "args": [addr]})
+
+    def define_code(self, addr: int) -> bool:
+        """Turn the bytes at ``addr`` (lifted) into an instruction."""
+        return self._send_request({"type": "method_call", "method_name": "define_code", "args": [addr]})
+
+    def define_data(self, addr: int, type_str: Optional[str] = None, size: Optional[int] = None) -> bool:
+        """Define data at ``addr`` (lifted), optionally with a C type."""
+        return self._send_request({"type": "method_call", "method_name": "define_data", "args": [addr, type_str, size]})
+
+    def undefine(self, addr: int, size: int = 1) -> bool:
+        """Undefine code/data at ``addr`` (lifted)."""
+        return self._send_request({"type": "method_call", "method_name": "undefine", "args": [addr, size]})
+
     def save(self, path: Optional[str] = None) -> bool:
         """Persist the backend's analysis to disk. Raises NotImplementedError for in-memory backends."""
         return self._send_request({"type": "method_call", "method_name": "save", "args": [path]})
