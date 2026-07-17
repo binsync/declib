@@ -859,6 +859,23 @@ class GhidraDecompilerInterface(DecompilerInterface):
         comments = self._comments()
         return comments.get(addr, None)
 
+    @ghidra_transaction
+    def _del_comment(self, addr) -> bool:
+        from .compat.imports import CodeUnit, SetCommentCmd
+
+        gaddr = self._to_gaddr(addr)
+        listing = self.currentProgram.getListing()
+        code_unit = listing.getCodeUnitAt(gaddr)
+        removed = False
+        for cmt_type in (
+            CodeUnit.PLATE_COMMENT, CodeUnit.PRE_COMMENT, CodeUnit.EOL_COMMENT,
+            CodeUnit.POST_COMMENT, CodeUnit.REPEATABLE_COMMENT,
+        ):
+            if code_unit is not None and code_unit.getComment(cmt_type):
+                SetCommentCmd(gaddr, cmt_type, None).applyTo(self.currentProgram)
+                removed = True
+        return removed
+
     def _comments(self) -> Dict[int, Comment]:
         from .compat.imports import CodeUnit
 

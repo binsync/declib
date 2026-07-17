@@ -136,6 +136,9 @@ same binary.
 | `disassemble <target>` | Assembly for a function. | `--raw`, same |
 | `xref_to <target>` | Every reference (code + data) to the target. | `--decompile`, same |
 | `xref_from <target>` | Functions that `target` calls. | same |
+| `comment set/append <addr> <text>` | Set (replace) or append a comment at an address. `--decompiled` attaches it to the pseudocode view. | `--decompiled`, same + `--json` |
+| `comment get/delete <addr>` | Read or remove the comment at an address. | same |
+| `comment list` | List every comment in the binary. | `--filter REGEX`, same |
 | `rename func <target> <new>` | Rename a function. | same + `--json` |
 | `rename var <old> <new> --function <f>` | Rename a local variable inside a function. | same |
 | `create-type "<C definition>"` | Define a new `struct`/`enum`/`typedef` from a C string and add it to the type database. | same + `--json` |
@@ -160,6 +163,27 @@ same binary.
   contain a `call` to the target. When you want "who calls this?" reach
   for `get_callers`; when you want "who touches this in any way?" reach
   for `xref_to`.
+
+### `comment` — annotate addresses
+
+Comments are the primary way to leave durable notes for later (or for another
+agent). They are keyed by address and come in two flavors: disassembly comments
+(default) and decompiler/pseudocode comments (`--decompiled`).
+
+```bash
+decompiler comment set 0x71d "entry point; parses argv"     # replace
+decompiler comment append 0x71d "calls authenticate()"       # add a line
+decompiler comment set 0x664 "SOSNEAKY backdoor" --decompiled
+decompiler comment get 0x71d                                 # print it (exit 1 if none)
+decompiler comment list --filter backdoor                    # find comments by text
+decompiler comment delete 0x71d
+```
+
+Addresses accept the usual lifted/absolute/decimal forms. `comment set` writes
+through the backend, so on IDA the address must be **inside a function**
+(disassembly comments elsewhere aren't supported by IDA's API). `angr`
+implements comment writes but not reads/enumeration yet — `comment get`/`list`
+return nothing there. Pair with `save` to make comments durable across reloads.
 
 ### Persistence — durable artifacts (`save`, `stop --save`)
 

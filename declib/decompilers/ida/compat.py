@@ -40,7 +40,7 @@ import idc, idaapi, ida_kernwin, ida_hexrays, ida_funcs, \
 import declib
 from declib.artifacts import (
     Struct, FunctionHeader, FunctionArgument, StackVariable, Function, GlobalVariable, Enum, Artifact, Context, Typedef,
-    StructMember, Segment
+    StructMember, Segment, Comment
 )
 
 from .artifact_lifter import IDAArtifactLifter
@@ -1086,18 +1086,162 @@ def set_ida_comment(addr, cmt, decompiled=False):
 
 
 def get_ida_comment(addr, decompiled=True):
-    # TODO: support more than just functions
-    # TODO: support more than just function headers
-    if decompiled and not ida_hexrays.init_hexrays_plugin():
-        raise ValueError("Decompiler is not available, but you are requesting a decompiled comment")
+    """Return the comment text at ``addr`` (any slot), or None.
 
+    Checks, in order: function header comment (when ``addr`` is a function
+    start), persisted decompiler user comment, then the disassembly comment.
+    """
     func = idaapi.get_func(addr)
-    if func is None:
-        return None
 
-    if func.start_ea == addr:
+    # function header/range comment
+    if func is not None and func.start_ea == addr:
         cmt = idc.get_func_cmt(addr, 1)
-        return cmt if cmt else None
+        if cmt:
+            return cmt
+
+    # decompiler user comment (read from the netnode, no re-decompile)
+    if func is not None and ida_hexrays.init_hexrays_plugin():
+        try:
+            uc = ida_hexrays.restore_user_cmts(func.start_ea)
+            if uc:
+                try:
+                    it = ida_hexrays.user_cmts_begin(uc)
+                    while it != ida_hexrays.user_cmts_end(uc):
+                        tl = ida_hexrays.user_cmts_first(it)
+                        if int(tl.ea) == addr:
+                            cmt = ida_hexrays.user_cmts_second(it)
+                            return str(cmt) if cmt is not None else None
+                        it = ida_hexrays.user_cmts_next(it)
+                finally:
+                    ida_hexrays.user_cmts_free(uc)
+        except Exception as e:
+            _l.debug("Failed reading decompiler comment at %s: %s", hex(addr), e)
+
+    # disassembly comment (regular or repeatable)
+    return _get_disasm_comment(addr)
+
+
+def _get_disasm_comment(addr):
+    """Return the regular or repeatable disassembly comment at ``addr``, or None."""
+    for rpt in (False, True):
+        cmt = ida_bytes.get_cmt(addr, rpt)
+        if cmt:
+            return cmt
+    return None
+
+
+@execute_write
+def del_ida_comment(addr, decompiled=False):
+    """Delete comments at ``addr`` across every slot IDA might store them in.
+
+    Clears the disassembly comment (regular + repeatable), the function
+    header/range comment when ``addr`` is a function start, and — when a
+    decompiler is present — the persisted Hexrays user comment. Returns True if
+    anything was removed.
+    """
+    removed = False
+
+    # disassembly comments
+    for rpt in (0, 1):
+        if ida_bytes.get_cmt(addr, bool(rpt)):
+            ida_bytes.set_cmt(addr, "", rpt)
+            removed = True
+
+    # function header / range comment
+    func = ida_funcs.get_func(addr)
+    if func is not None and func.start_ea == addr:
+        for rpt in (0, 1):
+            if idc.get_func_cmt(addr, rpt):
+                idc.set_func_cmt(addr, "", rpt)
+                removed = True
+
+    # decompiler user comment
+    if func is not None and ida_hexrays.init_hexrays_plugin():
+        try:
+            uc = ida_hexrays.restore_user_cmts(func.start_ea)
+            if uc:
+                it = ida_hexrays.user_cmts_begin(uc)
+                to_delete = []
+                while it != ida_hexrays.user_cmts_end(uc):
+                    tl = ida_hexrays.user_cmts_first(it)
+                    if int(tl.ea) == addr:
+                        to_delete.append(tl)
+                    it = ida_hexrays.user_cmts_next(it)
+                for tl in to_delete:
+                    ida_hexrays.user_cmts_erase(uc, tl)
+                    removed = True
+                if to_delete:
+                    ida_hexrays.save_user_cmts(func.start_ea, uc)
+                ida_hexrays.user_cmts_free(uc)
+        except Exception as e:
+            _l.debug("Failed clearing decompiler comment at %s: %s", hex(addr), e)
+
+    return removed
+
+
+@execute_write
+def comments():
+    """Enumerate every comment in the database as ``{ea: Comment}``.
+
+    Covers three sources: disassembly comments (regular + repeatable) at each
+    head, function header/range comments at each function start, and persisted
+    Hexrays decompiler user comments. Decompiler comments are read straight from
+    the saved netnode via ``restore_user_cmts`` so we never have to re-decompile
+    a function to list them.
+    """
+    results: typing.Dict[int, Comment] = {}
+
+    def _add(ea, text, decompiled):
+        if not text:
+            return
+        ea = int(ea)
+        existing = results.get(ea)
+        if existing is None:
+            results[ea] = Comment(addr=ea, comment=text, decompiled=decompiled)
+            return
+        if text not in (existing.comment or ""):
+            existing.comment = f"{existing.comment}\n{text}"
+        if decompiled:
+            existing.decompiled = True
+
+    # 1. disassembly comments at each head of each segment
+    for seg_ea in idautils.Segments():
+        seg = ida_segment.getseg(seg_ea)
+        if seg is None:
+            continue
+        for head in idautils.Heads(seg.start_ea, seg.end_ea):
+            for rpt in (False, True):
+                cmt = ida_bytes.get_cmt(head, rpt)
+                if cmt:
+                    _add(head, cmt, False)
+
+    # 2. per-function: header comment + persisted decompiler comments
+    hexrays_ok = ida_hexrays.init_hexrays_plugin()
+    for func_ea in idautils.Functions():
+        for rpt in (0, 1):
+            fcmt = idc.get_func_cmt(func_ea, rpt)
+            if fcmt:
+                _add(func_ea, fcmt, False)
+        if not hexrays_ok:
+            continue
+        try:
+            uc = ida_hexrays.restore_user_cmts(func_ea)
+        except Exception:
+            uc = None
+        if not uc:
+            continue
+        try:
+            it = ida_hexrays.user_cmts_begin(uc)
+            while it != ida_hexrays.user_cmts_end(uc):
+                tl = ida_hexrays.user_cmts_first(it)
+                cmt = ida_hexrays.user_cmts_second(it)
+                text = str(cmt) if cmt is not None else ""
+                _add(int(tl.ea), text, True)
+                it = ida_hexrays.user_cmts_next(it)
+        finally:
+            ida_hexrays.user_cmts_free(uc)
+
+    return results
 
 
 @execute_write

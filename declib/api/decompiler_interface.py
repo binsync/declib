@@ -528,6 +528,21 @@ class DecompilerInterface:
         """
         raise NotImplementedError
 
+    def get_comment(self, addr) -> Optional[Comment]:
+        """Return the lifted Comment at ``addr`` (lifted), or None.
+
+        Reads the backend directly rather than through the light-artifact
+        cache, so a comment set moments earlier is immediately visible.
+        """
+        lowered = self.art_lifter.lower_addr(addr)
+        cmt = self._get_comment(lowered)
+        return self.art_lifter.lift(cmt) if cmt is not None else None
+
+    def delete_comment(self, addr) -> bool:
+        """Delete any comment at ``addr`` (lifted). True if one was removed."""
+        lowered = self.art_lifter.lower_addr(addr)
+        return self._del_comment(lowered)
+
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
