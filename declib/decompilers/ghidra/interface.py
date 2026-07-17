@@ -14,7 +14,7 @@ from declib.api import DecompilerInterface, CType
 from declib.api.decompiler_interface import requires_decompilation
 from declib.artifacts import (
     Function, FunctionHeader, StackVariable, Comment, FunctionArgument, GlobalVariable, Struct, StructMember, Enum,
-    Decompilation, Context, Artifact, Typedef
+    Decompilation, Context, Artifact, Typedef, Patch
 )
 
 from .artifact_lifter import GhidraArtifactLifter
@@ -1075,6 +1075,46 @@ class GhidraDecompilerInterface(DecompilerInterface):
 
         norm_name, scope = self._gscoped_type_to_bs(g_typedef.getPathName())
         return Typedef(name=norm_name, type_=str(base_type.getPathName()), scope=scope)
+
+    # patches
+    @ghidra_transaction
+    def _set_patch(self, patch: Patch, **kwargs) -> bool:
+        import jpype
+        if not patch.bytes:
+            return False
+        memory = self.currentProgram.getMemory()
+        gaddr = self._to_gaddr(patch.addr)
+        # Java bytes are signed.
+        data = jpype.JArray(jpype.JByte)([b - 256 if b >= 128 else b for b in patch.bytes])
+        # Code blocks (.text) are mapped read-only, and setBytes honors the
+        # block's write flag. Flip it on for the write, then restore it so the
+        # program's permission metadata is unchanged.
+        block = memory.getBlock(gaddr)
+        toggled = False
+        try:
+            if block is not None and not block.isWrite():
+                block.setWrite(True)
+                toggled = True
+            # setBytes refuses to overwrite bytes under a defined instruction/
+            # data unit ("Memory change conflicts with instruction"), so clear
+            # the span first, then re-disassemble so patched code shows as code.
+            end = gaddr.add(len(patch.bytes) - 1)
+            self.flat_api.clearListing(gaddr, end)
+            memory.setBytes(gaddr, data)
+            try:
+                self.flat_api.disassemble(gaddr)
+            except Exception:
+                pass
+            return True
+        except Exception as exc:
+            self.warning(f"Ghidra setBytes patch failed: {exc}")
+            return False
+        finally:
+            if toggled and block is not None:
+                try:
+                    block.setWrite(False)
+                except Exception:
+                    pass
 
     def _typedefs(self) -> Dict[str, Typedef]:
         typedefs = {}

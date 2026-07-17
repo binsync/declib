@@ -351,6 +351,60 @@ class _CLIBackendTestBase(unittest.TestCase):
         self.assertNotIn("|.ELF", combined)
 
     # -------------------------------------------------------------------
+    # patching
+    # -------------------------------------------------------------------
+
+    #: Backends that can apply byte patches.
+    _patches_bytes: bool = True
+    #: Backends that track patches (get/list/revert). IDA is the reference.
+    _tracks_patches: bool = False
+
+    def test_patch_set_reflects_in_memory(self):
+        import base64
+        self._load_fauxware_isolated()
+        addr = self._main_start_addr()
+        orig = base64.b64decode(json.loads(
+            _run_cli("read_memory", _format_hex(addr), "4", "--json").stdout)["bytes_b64"])
+
+        r = _run_cli("patch", "set", _format_hex(addr), "90909090", "--json", check=False)
+        if not self._patches_bytes:
+            self.assertNotEqual(r.returncode, 0,
+                                f"{self.backend}: patch set unexpectedly succeeded")
+            return
+        if r.returncode != 0:
+            self.skipTest(f"{self.backend}: patch set unsupported: {r.stdout + r.stderr}")
+        self.assertTrue(json.loads(r.stdout)["success"])
+
+        now = base64.b64decode(json.loads(
+            _run_cli("read_memory", _format_hex(addr), "4", "--json").stdout)["bytes_b64"])
+        self.assertEqual(now, b"\x90\x90\x90\x90",
+                         f"{self.backend}: patched bytes not reflected in memory")
+
+        # Revert where supported and confirm the original bytes come back.
+        d = _run_cli("patch", "delete", _format_hex(addr), "--json", check=False)
+        if self._tracks_patches:
+            self.assertEqual(d.returncode, 0, f"{self.backend}: patch delete failed")
+            reverted = base64.b64decode(json.loads(
+                _run_cli("read_memory", _format_hex(addr), "4", "--json").stdout)["bytes_b64"])
+            self.assertEqual(reverted, orig,
+                             f"{self.backend}: patch delete did not restore original bytes")
+
+    def test_patch_get_and_list(self):
+        if not self._tracks_patches:
+            self.skipTest(f"{self.backend} does not track patches")
+        self._load_fauxware_isolated()
+        addr = self._main_start_addr()
+        setr = _run_cli("patch", "set", _format_hex(addr), "cccc", "--json", check=False)
+        if setr.returncode != 0:
+            self.skipTest(f"{self.backend}: patch set unsupported")
+        got = json.loads(_run_cli("patch", "get", _format_hex(addr), "--json").stdout)
+        self.assertTrue(got["bytes"].startswith("cccc"),
+                        f"{self.backend}: patch get wrong bytes: {got}")
+        listing = json.loads(_run_cli("patch", "list", "--json").stdout)
+        self.assertTrue(any("cccc" in e["bytes"] for e in listing),
+                        f"{self.backend}: patch not enumerated by list")
+
+    # -------------------------------------------------------------------
     # define / undefine (code & data repair)
     # -------------------------------------------------------------------
 
@@ -894,6 +948,8 @@ class TestDecompilerCLIAngr(_CLIBackendTestBase):
     _searches_bytes = False
     # angr's CFG-based model has no define/undefine primitives.
     _repairs_analysis = False
+    # angr has no user-patch store.
+    _patches_bytes = False
 
     # angr-specific sanity checks that don't map cleanly to the other
     # backends live here.
@@ -1055,6 +1111,7 @@ class TestDecompilerCLIIDA(_CLIBackendTestBase):
     """
     backend = "ida"
     _persists_project_files = True  # .id0/.id1/.id2/.nam/.til
+    _tracks_patches = True  # IDA records patched bytes and can revert them
 
 
 # ---------------------------------------------------------------------------

@@ -156,6 +156,9 @@ same binary.
 | `imports` | List imported symbols (external functions/data). | `--filter REGEX`, same |
 | `define function/code/data <addr>` | Repair analysis: create a function, disassemble bytes, or define data. | `--type`, `--size` (data), same |
 | `undefine <addr>` | Clear code/data at an address (removes a function if one starts there). | `--size`, same |
+| `patch set <addr> <hex>` | Patch bytes at an address. | same |
+| `patch get/delete <addr>` | Show or revert the patch at an address (IDA). | same |
+| `patch list` | List all byte patches (IDA). | same |
 | `read int/string/struct <addr> [...]` | Typed reads: decode memory as an integer, C string, or defined struct. | `--size`, `--signed`, `--endian`, `--max-len`, `--encoding`, same + `--json` |
 | `read_memory <addr> <size>` | Read raw bytes from the binary at `<addr>`. Default output is a hexdump. | `--format {hexdump,hex,raw}`, same + `--json` (base64-encoded bytes) |
 | `install-skill` | Install this file for Claude Code or Codex. | `--agent`, `--dest`, `--force`, `--json` |
@@ -240,6 +243,20 @@ saved database (IDA `.i64`, Ghidra project, Binary Ninja `.bndb`). `angr` is
 purely in-memory: `save` exits `2` (`not implemented`) and there is nothing to
 reload. IDA reopens the saved `.i64` directly (no re-analysis), so a reload after
 `save` is fast and lossless.
+
+### `patch` — modify bytes
+
+```bash
+decompiler patch set 0x401200 "9090"       # NOP out two bytes
+decompiler patch get 0x401200              # show the patch (IDA)
+decompiler patch list                      # every patch (IDA)
+decompiler patch delete 0x401200           # revert to original bytes (IDA)
+```
+
+`patch set` works on IDA, Ghidra, and Binary Ninja; `angr` has no user-patch
+store (exit non-zero). Patch **tracking** — `get`/`list`/`delete` (revert) —
+is IDA-only today; on other backends those return no results. Pair with `save`
+to persist patches.
 
 ### `define` / `undefine` — repair analysis
 

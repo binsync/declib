@@ -618,6 +618,12 @@ class IDAInterface(DecompilerInterface):
         patches = self._collect_continuous_patches(min_addr=addr-1, max_addr=addr+self._max_patch_size, stop_after_first=True)
         return patches.get(addr, None)
 
+    def _del_patch(self, addr) -> bool:
+        patch = self._get_patch(addr)
+        if patch is None or not patch.bytes:
+            return False
+        return compat.revert_patch(addr, len(patch.bytes))
+
     def _patches(self) -> Dict[int, Patch]:
         """
         Returns a dict of declib.Patch that contain the addr of each Patch and the bytes.
