@@ -150,6 +150,7 @@ same binary.
 | `sync <func> --from-id <src>` | Copy a function's work (names, return/arg types, stack-var names+types, referenced user types) from one running server into another for the same binary. | dest: `--id`/`--binary`/`--backend`; `--json` |
 | `list_strings` | Strings the decompiler found (may be incomplete — see below). | `--filter`, `--min-length N`, same |
 | `get_callers <target>` | Call-sites only — subset of `xref_to`. | same |
+| `read int/string/struct <addr> [...]` | Typed reads: decode memory as an integer, C string, or defined struct. | `--size`, `--signed`, `--endian`, `--max-len`, `--encoding`, same + `--json` |
 | `read_memory <addr> <size>` | Read raw bytes from the binary at `<addr>`. Default output is a hexdump. | `--format {hexdump,hex,raw}`, same + `--json` (base64-encoded bytes) |
 | `install-skill` | Install this file for Claude Code or Codex. | `--agent`, `--dest`, `--force`, `--json` |
 
@@ -233,6 +234,35 @@ saved database (IDA `.i64`, Ghidra project, Binary Ninja `.bndb`). `angr` is
 purely in-memory: `save` exits `2` (`not implemented`) and there is nothing to
 reload. IDA reopens the saved `.i64` directly (no re-analysis), so a reload after
 `save` is fast and lossless.
+
+### `read` — typed reads (int / string / struct)
+
+`read_memory` gives you raw bytes; `read` decodes them so you don't have to
+byte-twiddle. All three subcommands work on every backend (decoding happens
+client-side over `read_memory`).
+
+```bash
+decompiler read int 0x4040                      # pointer-sized int (little-endian)
+decompiler read int 0x4040 --size 4 --signed    # 4-byte signed
+decompiler read int 0x4040 --endian big
+decompiler read string 0x8e0                    # NUL-terminated C string
+decompiler read string 0x8e0 --max-len 512 --encoding latin-1
+decompiler create-type "struct Point { int x; int y; }"
+decompiler read struct 0x4050 Point             # decode each member
+# struct Point @ 0x4050 (size 8):
+#   +0x0   x                int               = 5  (05000000)
+#   +0x4   y                int               = 10 (0a000000)
+```
+
+### Address semantics — absolute and lifted both work
+
+Every address argument accepts **lifted** (relative to the image base, e.g.
+`0x2320`), **absolute/loaded** (`0x402320`), or **decimal**. The CLI normalizes
+absolute addresses to the backend's lifted form, so `read_memory 0x402320` and
+`read_memory 0x2320` return the same byte — no more "Ghidra rejects the absolute
+address" surprises. The heuristic: an address `>=` the image base is treated as
+absolute and rebased; a smaller one is already lifted. JSON output always echoes
+the resolved `addr`/`addr_hex` (lifted).
 
 ### `read_memory` — raw bytes at an address
 

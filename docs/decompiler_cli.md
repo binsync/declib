@@ -439,6 +439,34 @@ decompiler get_callers <target> [--id ID] [--binary PATH] [--backend BACKEND] [-
 Unlike `xref_to`, this never returns globals or other data refs. Rows are
 always of kind `Function`.
 
+### `read` (typed) and address semantics
+
+`read_memory` returns raw bytes; `read` decodes them. Decoding happens
+client-side over `read_memory`, so all three subcommands work on every backend.
+
+```bash
+decompiler read int <addr> [--size N] [--signed] [--endian little|big] [--json]
+decompiler read string <addr> [--max-len N] [--encoding ENC] [--json]
+decompiler read struct <addr> <struct-name> [--endian little|big] [--json]
+```
+
+```bash
+decompiler read int 0x4040 --size 4 --endian big      # -> {"value": 2130640198, ...}
+decompiler read string 0x8e0                           # -> "Welcome to ..."
+decompiler create-type "struct Point { int x; int y; }"
+decompiler read struct 0x4050 Point
+# struct Point @ 0x4050 (size 8):
+#   +0x0   x                int               = 5  (05000000)
+#   +0x4   y                int               = 10 (0a000000)
+```
+
+**Address forms.** Every address argument (here and in `read_memory`, `comment`,
+`global`, `xref_*`, ...) accepts a **lifted** offset (`0x2320`), an **absolute**
+loaded address (`0x402320`), or **decimal**. The CLI rebases absolute addresses
+to the backend's lifted form, so both refer to the same byte instead of the
+backend double-adding the image base. An address at or above the image base is
+treated as absolute; a smaller one is already lifted.
+
 ### `install-skill`
 
 Copy the bundled Agent Skill into a supported agent skill directory so Claude

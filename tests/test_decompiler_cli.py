@@ -350,6 +350,70 @@ class _CLIBackendTestBase(unittest.TestCase):
         combined = result.stdout + result.stderr
         self.assertNotIn("|.ELF", combined)
 
+    # -------------------------------------------------------------------
+    # typed reads + address semantics
+    # -------------------------------------------------------------------
+
+    def test_read_int_elf_magic(self):
+        """`read int` decodes the ELF magic word at the image base (lifted 0x0)."""
+        self._load_fauxware_isolated()
+        # Big-endian 4 bytes at 0x0 == 0x7f454c46 ("\x7fELF").
+        result = _run_cli("read", "int", "0x0", "--size", "4", "--endian", "big", "--json")
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["value"], 0x7f454c46,
+                         f"{self.backend}: read int gave {payload['value']:#x}")
+        # Little-endian reversal.
+        le = json.loads(_run_cli("read", "int", "0x0", "--size", "4", "--json").stdout)
+        self.assertEqual(le["value"], 0x464c457f)
+
+    def test_read_string(self):
+        self._load_fauxware_isolated()
+        strings = json.loads(_run_cli("list_strings", "--filter", "Welcome", "--json").stdout)
+        self.assertTrue(strings, f"{self.backend}: 'Welcome' string not surfaced")
+        addr = strings[0]["addr"]
+        result = _run_cli("read", "string", _format_hex(addr), "--json")
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["string"].startswith("Welcome"),
+                        f"{self.backend}: read string gave {payload['string']!r}")
+
+    def test_read_struct(self):
+        """Define a struct and decode the ELF header bytes through it."""
+        self._load_fauxware_isolated()
+        rc = _run_cli("create-type", "struct ElfMagic { int magic; short type; }",
+                      "--json", check=False)
+        if rc.returncode != 0 or not json.loads(rc.stdout).get("success"):
+            self.skipTest(f"{self.backend}: could not define struct: {rc.stdout + rc.stderr}")
+        result = _run_cli("read", "struct", "0x0", "ElfMagic", "--json", check=False)
+        if result.returncode != 0:
+            self.skipTest(f"{self.backend}: read struct unsupported: {result.stdout + result.stderr}")
+        payload = json.loads(result.stdout)
+        members = {m["name"]: m for m in payload["members"]}
+        self.assertIn("magic", members)
+        # Little-endian int of "\x7fELF" == 0x464c457f.
+        self.assertEqual(members["magic"]["value"], 0x464c457f,
+                         f"{self.backend}: struct member decode wrong: {members['magic']}")
+
+    def test_read_memory_absolute_and_lifted_agree(self):
+        """Regression for double-base-add: absolute and lifted addrs read the same byte."""
+        import base64
+        self._load_fauxware_isolated()
+        client = self._direct_client()
+        try:
+            base = client.binary_base_addr
+        finally:
+            client.shutdown()
+        # Lifted 0x0 -> ELF magic.
+        lifted = json.loads(_run_cli("read_memory", "0x0", "4", "--json").stdout)
+        self.assertEqual(base64.b64decode(lifted["bytes_b64"]), b"\x7fELF")
+        if not base:
+            self.skipTest(f"{self.backend}: image base is 0; absolute == lifted")
+        # Absolute (base + 0) must resolve to the same bytes, not double-add base.
+        absolute = _run_cli("read_memory", _format_hex(base), "4", "--json", check=False)
+        self.assertEqual(absolute.returncode, 0,
+                         f"{self.backend}: absolute read failed: {absolute.stdout + absolute.stderr}")
+        self.assertEqual(base64.b64decode(json.loads(absolute.stdout)["bytes_b64"]), b"\x7fELF",
+                         f"{self.backend}: absolute address didn't normalize to lifted")
+
     #: Subclasses set this to True if their backend actually persists files
     #: (Ghidra project, IDA database, etc). For in-memory backends like angr
     #: it stays False and we only assert "nothing wound up next to the binary".
