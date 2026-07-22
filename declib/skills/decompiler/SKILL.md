@@ -49,6 +49,11 @@ decompiler list_functions --filter 'main|auth' # or narrow by regex
 decompiler list_strings --filter 'flag|pass'   # find interesting string constants
 ```
 
+If `load` fails, read the reported server-log tail before trying another
+backend; startup child failures are surfaced immediately. Use
+`--timeout SECONDS` to fit a strict task budget or allow an unusually slow
+initial analysis. Successful JSON output includes the persistent `log_path`.
+
 Typical first-hour workflow on a stripped binary:
 
 1. `decompiler load ./bin --backend ida` (fall back to `--backend ghidra`,

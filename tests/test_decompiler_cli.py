@@ -18,6 +18,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from declib.api import server_registry
 from declib.api.decompiler_client import DecompilerClient
@@ -156,6 +157,9 @@ class _CLIBackendTestBase(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertIn(payload["status"], ("started", "already_loaded"))
         self.assertEqual(payload["backend"], self.backend)
+        if payload["status"] == "started":
+            self.assertIn("log_path", payload)
+            self.assertTrue(Path(payload["log_path"]).is_file())
         return payload
 
     def _resolve_main_name(self):
@@ -1454,6 +1458,58 @@ class TestCLIFormatters(unittest.TestCase):
         annotated = _annotate_addrs(payload)
         self.assertNotIn("-", annotated["addr_hex"])
         self.assertEqual(annotated["target_addr_hex"], "0x1000")
+
+    def test_wait_for_server_reports_early_child_exit_and_log(self):
+        from declib.cli import decompiler_cli
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "server.log"
+            log_path.write_text("backend import failed\ntraceback details\n")
+            process = mock.Mock()
+            process.poll.return_value = 17
+
+            with mock.patch.object(
+                decompiler_cli.server_registry, "find_server", return_value=None
+            ):
+                with self.assertRaises(SystemExit) as raised:
+                    decompiler_cli._wait_for_server(
+                        "deadbeef",
+                        process=process,
+                        log_path=log_path,
+                        timeout=300,
+                    )
+
+        message = str(raised.exception)
+        self.assertIn("exited with status 17", message)
+        self.assertIn(str(log_path), message)
+        self.assertIn("backend import failed", message)
+
+    def test_wait_for_server_timeout_includes_bounded_log_tail(self):
+        from declib.cli import decompiler_cli
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "server.log"
+            log_path.write_text("discard-me\n" + "x" * 32 + "useful tail\n")
+            tail = decompiler_cli._read_server_log_tail(log_path, max_bytes=16)
+            self.assertNotIn("discard-me", tail)
+            self.assertTrue(tail.endswith("useful tail"))
+
+            with self.assertRaises(SystemExit) as raised:
+                decompiler_cli._wait_for_server(
+                    "slowserver",
+                    log_path=log_path,
+                    timeout=0,
+                )
+
+        message = str(raised.exception)
+        self.assertIn("Timed out waiting 0s", message)
+        self.assertIn("Server log tail", message)
+
+    def test_load_timeout_argument(self):
+        from declib.cli.decompiler_cli import build_parser
+
+        args = build_parser().parse_args(["load", "/tmp/example", "--timeout", "12.5"])
+        self.assertEqual(args.timeout, 12.5)
 
 
 # ---------------------------------------------------------------------------
