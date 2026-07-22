@@ -17,7 +17,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 from declib.api import server_registry
 from declib.api.decompiler_client import DecompilerClient
@@ -231,6 +235,23 @@ class _CLIBackendTestBase(unittest.TestCase):
         raw = _run_cli("decompile", name, "--raw")
         self.assertNotIn('\\n', raw.stdout)
         self.assertNotIn('{"addr"', raw.stdout)
+
+    def test_decompile_line_map(self):
+        self._load_fauxware()
+        name = self._resolve_main_name()
+        result = _run_cli("decompile", name, "--map-lines", "--json")
+        payload = json.loads(result.stdout)
+
+        self.assertTrue(payload["line_map"], "empty decompilation line map")
+        lines = [entry["line"] for entry in payload["line_map"]]
+        self.assertEqual(lines, sorted(lines))
+        for entry in payload["line_map"]:
+            self.assertIsInstance(entry["line"], int)
+            self.assertEqual(entry["addrs"], sorted(set(entry["addrs"])))
+            self.assertEqual(
+                entry["addrs_hex"],
+                [f"0x{addr:x}" for addr in entry["addrs"]],
+            )
 
     def test_list_strings(self):
         self._load_fauxware()
@@ -1454,6 +1475,59 @@ class TestCLIFormatters(unittest.TestCase):
         annotated = _annotate_addrs(payload)
         self.assertNotIn("-", annotated["addr_hex"])
         self.assertEqual(annotated["target_addr_hex"], "0x1000")
+
+    def test_format_line_map_is_stable_and_json_friendly(self):
+        from declib.cli.decompiler_cli import _format_line_map
+
+        formatted = _format_line_map({4: {0x1020, 0x1010}, 1: [0x1000]})
+        self.assertEqual(
+            formatted,
+            [
+                {"line": 1, "addrs": [0x1000], "addrs_hex": ["0x1000"]},
+                {
+                    "line": 4,
+                    "addrs": [0x1010, 0x1020],
+                    "addrs_hex": ["0x1010", "0x1020"],
+                },
+            ],
+        )
+        json.dumps(formatted)
+
+    def test_map_lines_requires_json(self):
+        result = _run_cli("decompile", "main", "--map-lines", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--map-lines requires --json", result.stderr)
+
+    def test_decompile_requests_and_emits_line_map(self):
+        from declib.artifacts import Decompilation
+        from declib.cli import decompiler_cli
+
+        client = mock.MagicMock()
+        client.functions = {0x1000: SimpleNamespace(name="main")}
+        client.decompile.return_value = Decompilation(
+            addr=0x1000,
+            text="int main(void) { return 0; }",
+            line_map={2: {0x1010, 0x1008}},
+            decompiler="test",
+        )
+        client_context = mock.MagicMock()
+        client_context.__enter__.return_value = client
+        args = decompiler_cli.build_parser().parse_args(
+            ["decompile", "main", "--map-lines", "--json"]
+        )
+
+        output = StringIO()
+        with mock.patch.object(decompiler_cli, "_with_client", return_value=client_context):
+            with redirect_stdout(output):
+                result = decompiler_cli.cmd_decompile(args)
+
+        self.assertEqual(result, 0)
+        client.decompile.assert_called_once_with(0x1000, map_lines=True)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(
+            payload["line_map"],
+            [{"line": 2, "addrs": [0x1008, 0x1010], "addrs_hex": ["0x1008", "0x1010"]}],
+        )
 
 
 # ---------------------------------------------------------------------------
