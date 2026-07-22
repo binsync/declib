@@ -64,6 +64,7 @@ _l = logging.getLogger("declib.cli.decompiler")
 
 _SERVER_START_TIMEOUT = 300.0  # seconds; Ghidra initial analysis can be slow
 _SERVER_POLL_INTERVAL = 0.25
+_SERVER_LOG_TAIL_BYTES = 8192
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -206,6 +207,7 @@ def _spawn_server(
     backend: str,
     server_id: str,
     project_dir: Optional[Path] = None,
+    log_path: Optional[Path] = None,
 ) -> subprocess.Popen:
     """Start a detached headless server process for the given binary."""
     cmd = [
@@ -221,10 +223,15 @@ def _spawn_server(
     env = os.environ.copy()
     # Inherit env so things like GHIDRA_INSTALL_DIR flow through.
 
+    if log_path is None:
+        log_path = _server_log_path(server_id)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_stream = log_path.open("wb")
+
     # Fully detach: new session so Ctrl-C in the CLI won't kill the server.
     kwargs = {
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
+        "stdout": log_stream,
+        "stderr": subprocess.STDOUT,
         "stdin": subprocess.DEVNULL,
         "env": env,
         "close_fds": True,
@@ -235,20 +242,70 @@ def _spawn_server(
         kwargs["creationflags"] = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
             subprocess, "CREATE_NEW_PROCESS_GROUP", 0
         )
-    return subprocess.Popen(cmd, **kwargs)
+    try:
+        return subprocess.Popen(cmd, **kwargs)
+    finally:
+        # Popen duplicated the descriptor for the child; the CLI does not need
+        # to keep its copy open while it waits for registration.
+        log_stream.close()
 
 
-def _wait_for_server(server_id: str, timeout: float = _SERVER_START_TIMEOUT) -> Dict:
+def _server_log_path(server_id: str) -> Path:
+    """Keep each detached server's diagnostics beside its Unix socket."""
+    return Path(server_registry.default_socket_path(server_id)).with_name("server.log")
+
+
+def _read_server_log_tail(
+    log_path: Optional[Path],
+    max_bytes: int = _SERVER_LOG_TAIL_BYTES,
+) -> str:
+    if log_path is None:
+        return ""
+    try:
+        with log_path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - max_bytes))
+            return stream.read().decode("utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def _server_start_error(message: str, log_path: Optional[Path]) -> SystemExit:
+    lines = [message]
+    if log_path is not None:
+        lines.append(f"Server log: {log_path}")
+        tail = _read_server_log_tail(log_path)
+        if tail:
+            lines.extend(("Server log tail:", tail))
+    return SystemExit("\n".join(lines))
+
+
+def _wait_for_server(
+    server_id: str,
+    process: Optional[subprocess.Popen] = None,
+    log_path: Optional[Path] = None,
+    timeout: float = _SERVER_START_TIMEOUT,
+) -> Dict:
     """Block until a server with `server_id` appears in the registry or timeout."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         record = server_registry.find_server(server_id=server_id)
         if record and record.get("socket_path") and os.path.exists(record["socket_path"]):
             return record
+        if process is not None:
+            exit_status = process.poll()
+            if exit_status is not None:
+                raise _server_start_error(
+                    f"Decompiler server {server_id} exited with status "
+                    f"{exit_status} before registering.",
+                    log_path,
+                )
         time.sleep(_SERVER_POLL_INTERVAL)
-    raise SystemExit(
-        f"Timed out waiting {timeout:.0f}s for server {server_id} to start. "
-        "Check backend dependencies (e.g. GHIDRA_INSTALL_DIR) and retry."
+    raise _server_start_error(
+        f"Timed out waiting {timeout:g}s for server {server_id} to start. "
+        "Check backend dependencies (e.g. GHIDRA_INSTALL_DIR) and retry.",
+        log_path,
     )
 
 
@@ -261,6 +318,11 @@ def cmd_load(args) -> int:
     if backend not in SUPPORTED_DECOMPILERS:
         raise SystemExit(
             f"Unsupported backend {backend!r}; pick one of: {sorted(SUPPORTED_DECOMPILERS)}"
+        )
+    if args.timeout <= 0:
+        raise SystemExit(
+            "decompiler load: --timeout must be greater than zero "
+            f"(got {args.timeout:g})"
         )
 
     # Existing server(s) for this binary+backend.
@@ -293,8 +355,20 @@ def cmd_load(args) -> int:
         project_dir = Path(args.project_dir).expanduser().resolve()
     else:
         project_dir = _default_project_dir(binary_path, backend)
-    _spawn_server(binary_path, backend, server_id, project_dir=project_dir)
-    record = _wait_for_server(server_id)
+    log_path = _server_log_path(server_id)
+    process = _spawn_server(
+        binary_path,
+        backend,
+        server_id,
+        project_dir=project_dir,
+        log_path=log_path,
+    )
+    record = _wait_for_server(
+        server_id,
+        process=process,
+        log_path=log_path,
+        timeout=args.timeout,
+    )
     _emit(args, {
         "status": "started",
         "id": record["id"],
@@ -302,6 +376,7 @@ def cmd_load(args) -> int:
         "backend": record.get("backend"),
         "socket_path": record.get("socket_path"),
         "project_dir": str(project_dir) if project_dir is not None else None,
+        "log_path": str(log_path),
     })
     return 0
 
@@ -1921,6 +1996,15 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Start a new server even if one already exists for this binary.")
     p_load.add_argument("--replace", action="store_true",
                         help="Stop the existing server for this binary+backend (if any) before starting.")
+    p_load.add_argument(
+        "--timeout",
+        type=float,
+        default=_SERVER_START_TIMEOUT,
+        help=(
+            "Seconds to wait for backend startup (default: "
+            f"{_SERVER_START_TIMEOUT:g})."
+        ),
+    )
     p_load.add_argument(
         "--project-dir",
         dest="project_dir",

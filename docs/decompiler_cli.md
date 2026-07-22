@@ -131,6 +131,7 @@ it.
 decompiler load <binary> [--backend {angr,ghidra,binja,ida}]
                          [--id SERVER_ID]
                          [--force | --replace]
+                         [--timeout SECONDS]
                          [--project-dir PATH]
                          [--json]
 ```
@@ -142,6 +143,9 @@ decompiler load <binary> [--backend {angr,ghidra,binja,ida}]
 - **`--replace`** — stop any existing server for this `(binary, backend)`
   first, then start a fresh one. Use this when you want to re-analyze from
   scratch.
+- **`--timeout SECONDS`** (default: 300) — maximum time to wait for the
+  backend to register. Slow Ghidra or IDA analyses may need a larger value;
+  use a smaller value in automation when a strict task timebox matters.
 - **`--project-dir PATH`** — where to keep the backend's
   project/database files (Ghidra project, IDA `.id*`/`.til`, etc.).
   Default: a per-binary directory under the user cache
@@ -150,8 +154,16 @@ decompiler load <binary> [--backend {angr,ghidra,binja,ida}]
   to disable the cache dir and let the backend drop files alongside the
   binary (legacy behavior).
 
-Outputs `id`, `socket_path`, `binary_path`, `backend`, `project_dir`, and
-`status` (either `started` or `already_loaded`).
+For a newly started server, output includes `id`, `socket_path`, `binary_path`,
+`backend`, `project_dir`, `log_path`, and `status`. `status` is either
+`started` or `already_loaded` (the latter describes an existing server and
+does not add a new `log_path`).
+
+Detached server stdout and stderr are written to `log_path`. If the child
+exits before registering, `load` fails immediately instead of waiting for the
+full timeout and prints the final 8 KiB of that log. A timeout reports the same
+path and bounded tail, which usually reveals a missing dependency, license
+failure, backend exception, or stale project problem.
 
 ### `list`
 
