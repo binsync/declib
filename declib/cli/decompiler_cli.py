@@ -560,6 +560,12 @@ def _known_function_addrs(client) -> set:
 
 
 def cmd_decompile(args) -> int:
+    if args.map_lines and (args.raw or not args.json):
+        raise SystemExit(
+            "decompiler decompile: --map-lines requires --json and cannot "
+            "be combined with --raw"
+        )
+
     with _with_client(args) as client:
         addr = _resolve_function_addr(client, args.target)
         known = _known_function_addrs(client)
@@ -571,7 +577,7 @@ def cmd_decompile(args) -> int:
                 f"Try `decompiler list_functions --filter '{args.target}'` or "
                 "pick a function-start address."
             )
-        dec = client.decompile(addr)
+        dec = client.decompile(addr, map_lines=args.map_lines)
         if dec is None:
             raise SystemExit(
                 f"Decompiler engine returned no result for 0x{addr:x}. "
@@ -589,6 +595,8 @@ def cmd_decompile(args) -> int:
             "decompiler": dec.decompiler if hasattr(dec, "decompiler") else None,
             "text": text,
         }
+        if args.map_lines:
+            out["line_map"] = _format_line_map(getattr(dec, "line_map", None))
         _emit(args, out, text_field="text")
     return 0
 
@@ -1897,6 +1905,27 @@ def _format_addr_hex(value: int) -> str:
     return f"0x{value:x}"
 
 
+def _format_line_map(line_map) -> List[Dict]:
+    """Render a decompilation line map as stable, JSON-friendly records.
+
+    Backend artifacts use ``dict[int, set[int]]`` (with a few backends
+    returning lists). Sets are not JSON serializable and relying on
+    ``default=str`` produces nondeterministic, hard-to-consume output. Keep
+    both integer and hexadecimal address forms, matching the rest of the CLI.
+    """
+    records: List[Dict] = []
+    for line, raw_addrs in sorted((line_map or {}).items(), key=lambda item: int(item[0])):
+        if isinstance(raw_addrs, int):
+            raw_addrs = [raw_addrs]
+        addrs = sorted({int(addr) for addr in raw_addrs})
+        records.append({
+            "line": int(line),
+            "addrs": addrs,
+            "addrs_hex": [_format_addr_hex(addr) for addr in addrs],
+        })
+    return records
+
+
 def _emit(args, payload: Dict, *, text_field: Optional[str] = None) -> None:
     """Emit a response either as JSON or as a human-readable block."""
     if args.json:
@@ -2034,6 +2063,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_dec.add_argument("target", help="Function name or address (hex/decimal).")
     p_dec.add_argument("--raw", action="store_true",
                        help="Print the decompilation text directly (no JSON or header wrapping).")
+    p_dec.add_argument(
+        "--map-lines",
+        action="store_true",
+        help=(
+            "Include backend pseudocode-line to instruction-address mappings "
+            "in JSON output (requires --json)."
+        ),
+    )
     _add_server_filter_args(p_dec)
     _add_output_args(p_dec)
     p_dec.set_defaults(func=cmd_decompile)

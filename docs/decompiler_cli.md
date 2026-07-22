@@ -249,7 +249,8 @@ JSON output is a list of `{"addr": int, "size": int, "name": str, "addr_hex": st
 Decompile a function to pseudocode.
 
 ```bash
-decompiler decompile <target> [--raw] [--id ID] [--binary PATH] [--backend BACKEND] [--json]
+decompiler decompile <target> [--raw | --map-lines --json] \
+  [--id ID] [--binary PATH] [--backend BACKEND]
 ```
 
 `<target>` is a function name or address (hex/decimal, lifted or absolute —
@@ -258,9 +259,26 @@ see [Address formats](#address-formats)).
 - **`--raw`** — print the decompilation text directly, skipping all
   wrapping. Useful at a terminal when `--json`'s escaped `\n`s are
   unreadable.
+- **`--map-lines --json`** — ask the backend to map pseudocode lines to the
+  corresponding lifted instruction addresses. The JSON response adds a
+  deterministic `line_map` list. Each record has `line`, sorted integer
+  `addrs`, and matching `addrs_hex` values. A line may map to several
+  instructions, and some pseudocode lines may have no mapping.
 
 Default text output is the decompilation. JSON output includes `addr`,
-`addr_hex`, `decompiler`, and `text`.
+`addr_hex`, `decompiler`, and `text`, plus `line_map` when requested.
+
+```json
+{
+  "addr": 1821,
+  "addr_hex": "0x71d",
+  "decompiler": "ida",
+  "text": "int main(...) { ... }",
+  "line_map": [
+    {"line": 4, "addrs": [1849], "addrs_hex": ["0x739"]}
+  ]
+}
+```
 
 Error messages distinguish three failure modes:
 

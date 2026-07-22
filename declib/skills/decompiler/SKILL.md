@@ -455,6 +455,18 @@ decompiler decompile main --json
 decompiler decompile main --raw
 ```
 
+When statement addresses matter for comments, patches, or control-flow
+reasoning, request the backend's pseudocode line mapping:
+
+```bash
+decompiler decompile main --map-lines --json
+# "line_map": [{"line": 4, "addrs": [1849], "addrs_hex": ["0x739"]}, ...]
+```
+
+Lines can map to multiple instructions, and presentation-only lines may have
+no mapping. `--map-lines` requires `--json` and cannot be combined with
+`--raw`.
+
 ## Gotchas and tips
 
 - **First `load` is slow** (backend analysis pass). Subsequent calls on the
