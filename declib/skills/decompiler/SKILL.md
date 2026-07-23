@@ -64,6 +64,23 @@ Typical first-hour workflow on a stripped binary:
 4. `decompiler xref_to "Welcome"` → jump from a string to its users
 5. `decompiler decompile <addr>` on whichever function came out of steps 3–4
 
+When several independent reads are already known, send them as a JSONL batch
+to avoid paying Python startup, server discovery, and connection setup for
+each command:
+
+```bash
+decompiler batch --stdin --json <<'EOF'
+{"id":"functions","argv":["list_functions","--filter","main|auth"]}
+{"id":"strings","argv":["list_strings","--filter","flag|pass"]}
+{"id":"main","argv":["decompile","main"]}
+EOF
+```
+
+The batch selects one server with the usual outer `--id`, `--binary`, or
+`--backend` flags. Operations use ordinary CLI argument arrays, inherit that
+server, return an independent result/error, and continue after failures by
+default. Use `--stop-on-error` when later operations depend on earlier ones.
+
 ## Core workflow
 
 ```bash
@@ -134,6 +151,7 @@ same binary.
 |---|---|---|
 | `load <bin>` | Start a server on the binary. Idempotent: returns existing unless `--force`/`--replace`. | `--backend`, `--id`, `--force`, `--replace`, `--project-dir`, `--json` |
 | `list` | Show all running servers and the registry path. | `--show-registry`, `--json` |
+| `batch` | Run JSONL operations over one persistent server connection. | `--file`/`--stdin`, `--stop-on-error`, server selector, `--json` |
 | `stop` | Shut down one or all servers. `--save` flushes analysis to disk first; `--discard` drops unsaved edits. | `--id`, `--binary`, `--all`, `--save`, `--discard`, `--json` |
 | `save` | Persist backend analysis to disk so renames/types/comments survive a reload. | `--path`, `--id`, `--binary`, `--backend`, `--json` |
 | `list_functions` | Enumerate every function (ADDR, SIZE, NAME). | `--filter REGEX`, `--json` |

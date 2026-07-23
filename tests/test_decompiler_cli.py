@@ -267,6 +267,35 @@ class _CLIBackendTestBase(unittest.TestCase):
                 [f"0x{addr:x}" for addr in entry["addrs"]],
             )
 
+    def test_batch_mixed_reads(self):
+        """A real server executes mixed commands through one batch request."""
+        self._load_fauxware()
+        name = self._resolve_main_name()
+        operations = [
+            {"id": "functions", "argv": ["list_functions", "--filter", "auth"]},
+            {"id": "decompile", "argv": ["decompile", name]},
+            {"id": "header", "argv": ["read_memory", "0", "4", "--format", "hex"]},
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch_path = Path(tmpdir) / "operations.jsonl"
+            batch_path.write_text(
+                "\n".join(json.dumps(operation) for operation in operations),
+                encoding="utf-8",
+            )
+            result = _run_cli("batch", "--file", str(batch_path), "--json")
+
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["summary"], {
+            "requested": 3,
+            "completed": 3,
+            "failed": 0,
+            "stopped_early": False,
+        })
+        results = {entry["id"]: entry for entry in payload["results"]}
+        self.assertTrue(results["functions"]["result"])
+        self.assertTrue(results["decompile"]["result"]["text"])
+        self.assertEqual(results["header"]["result"]["hex"], "7f454c46")
+
     def test_list_strings(self):
         self._load_fauxware()
         # Every supported backend sees this string in fauxware.
@@ -1465,6 +1494,101 @@ class TestArtifactWireSerialization(unittest.TestCase):
         encoded = dec.dumps(fmt=ArtifactFormat.TOML)
         with self.assertRaises(toml.decoder.TomlDecodeError):
             Decompilation.loads(encoded, fmt=ArtifactFormat.TOML)
+
+
+class TestCLIBatch(unittest.TestCase):
+    def _run_batch(self, operations, *extra_args):
+        from declib.artifacts import Decompilation
+        from declib.cli import decompiler_cli
+
+        client = mock.MagicMock()
+        client.__enter__.return_value = client
+        client.functions = {0x1000: SimpleNamespace(name="main", size=32)}
+        client.decompile.return_value = Decompilation(
+            addr=0x1000,
+            text="int main(void) { return 0; }",
+            decompiler="test",
+        )
+        client.read_memory.return_value = b"\x7fELF"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch_path = Path(tmpdir) / "operations.jsonl"
+            batch_path.write_text(
+                "\n".join(
+                    value if isinstance(value, str) else json.dumps(value)
+                    for value in operations
+                )
+            )
+            args = decompiler_cli.build_parser().parse_args(
+                ["batch", "--file", str(batch_path), "--json", *extra_args]
+            )
+            stdout = StringIO()
+            with mock.patch.object(
+                decompiler_cli, "_select_server", return_value={"socket_path": "/tmp/test.sock"}
+            ) as select_server:
+                with mock.patch.object(
+                    decompiler_cli, "_connect_client", return_value=client
+                ) as connect_client:
+                    with redirect_stdout(stdout):
+                        exit_code = decompiler_cli.cmd_batch(args)
+
+        return (
+            exit_code,
+            json.loads(stdout.getvalue()),
+            client,
+            select_server,
+            connect_client,
+        )
+
+    def test_mixed_operations_share_one_client(self):
+        exit_code, payload, client, select_server, connect_client = self._run_batch(
+            [
+                {"id": "functions", "argv": ["list_functions", "--filter", "main"]},
+                {"id": "decompile", "argv": ["decompile", "main"]},
+                {"id": "header", "argv": ["read_memory", "0x1000", "4"]},
+            ]
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["summary"]["completed"], 3)
+        self.assertEqual(payload["summary"]["failed"], 0)
+        self.assertTrue(all(result["ok"] for result in payload["results"]))
+        self.assertEqual(payload["results"][0]["result"][0]["name"], "main")
+        self.assertEqual(payload["results"][1]["result"]["text"], client.decompile.return_value.text)
+        self.assertEqual(payload["results"][2]["result"]["hex"], "7f454c46")
+        select_server.assert_called_once()
+        connect_client.assert_called_once()
+        client.decompile.assert_called_once_with(0x1000, map_lines=False)
+
+    def test_stop_on_error_and_input_errors(self):
+        exit_code, payload, _client, _select, _connect = self._run_batch(
+            [
+                "not json",
+                {"id": "never-runs", "argv": ["list_functions"]},
+            ],
+            "--stop-on-error",
+        )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["summary"]["requested"], 2)
+        self.assertEqual(payload["summary"]["completed"], 1)
+        self.assertTrue(payload["summary"]["stopped_early"])
+        self.assertIn("Invalid JSON", payload["results"][0]["error"])
+
+    def test_lifecycle_and_raw_operations_are_rejected(self):
+        exit_code, payload, _client, _select, _connect = self._run_batch(
+            [
+                {"id": "stop", "argv": ["stop", "--all"]},
+                {"id": "raw", "argv": ["decompile", "main", "--raw"]},
+                {"id": "bypass", "argv": ["-v", "stop", "--all"]},
+            ]
+        )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["summary"]["failed"], 3)
+        self.assertIn("not allowed", payload["results"][0]["error"])
+        self.assertIn("--raw", payload["results"][1]["error"])
+        self.assertIn("not allowed", payload["results"][2]["error"])
 
 
 class TestCLIFormatters(unittest.TestCase):

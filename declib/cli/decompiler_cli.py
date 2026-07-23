@@ -9,6 +9,7 @@ via the shared server registry (see declib.api.server_registry).
 Subcommands implemented:
 - load            start a server on a binary
 - list            list running servers
+- batch           execute JSONL CLI operations through one client connection
 - stop            stop one or all servers (with --save/--discard)
 - save            persist backend analysis to disk (durable artifacts)
 - list_functions  list functions in the binary, optionally filtered by regex
@@ -36,7 +37,10 @@ Subcommands implemented:
 - install-skill   install the bundled Agent Skill so LLMs learn the CLI
 """
 import argparse
+from contextlib import redirect_stderr, redirect_stdout
+from contextvars import ContextVar
 import hashlib
+from io import StringIO
 import json
 import logging
 import os
@@ -66,6 +70,15 @@ _l = logging.getLogger("declib.cli.decompiler")
 _SERVER_START_TIMEOUT = 300.0  # seconds; Ghidra initial analysis can be slow
 _SERVER_POLL_INTERVAL = 0.25
 _SERVER_LOG_TAIL_BYTES = 8192
+_BATCH_CLIENT = ContextVar("declib_batch_client", default=None)
+_BATCH_DISALLOWED_COMMANDS = {
+    "batch",
+    "install-skill",
+    "list",
+    "load",
+    "stop",
+    "sync",
+}
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -189,8 +202,24 @@ def _connect_client(record: Dict):
     return DecompilerClient(socket_path=record["socket_path"])
 
 
+class _BorrowedClient:
+    """Context manager that lends a batch's client without closing it."""
+
+    def __init__(self, client):
+        self.client = client
+
+    def __enter__(self):
+        return self.client
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+
 def _with_client(args):
     """Resolve & connect to the selected server, returning the client."""
+    batch_client = _BATCH_CLIENT.get()
+    if batch_client is not None:
+        return _BorrowedClient(batch_client)
     record = _select_server(
         server_id=getattr(args, "id", None),
         binary_path=getattr(args, "binary", None),
@@ -547,6 +576,192 @@ def cmd_save(args) -> int:
             )
         _emit(args, {"saved": ok, "path": args.path})
         return EXIT_OK if ok else EXIT_USER_ERROR
+
+
+# ---------------------------------------------------------------------------
+# batch
+# ---------------------------------------------------------------------------
+
+def _read_batch_operations(args) -> List[Dict]:
+    if args.file:
+        try:
+            lines = Path(args.file).expanduser().read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            raise SystemExit(f"Could not read batch file {args.file!r}: {exc}") from exc
+    else:
+        lines = sys.stdin.read().splitlines()
+
+    operations = []
+    seen_ids = set()
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        default_id = f"line-{line_number}"
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            operations.append({
+                "id": default_id,
+                "_input_error": f"Invalid JSON on line {line_number}: {exc.msg}",
+            })
+            continue
+        if not isinstance(value, dict):
+            operations.append({
+                "id": default_id,
+                "_input_error": f"Batch line {line_number} must be a JSON object.",
+            })
+            continue
+
+        operation_id = value.get("id", default_id)
+        if not isinstance(operation_id, (str, int)):
+            operation_id = default_id
+            value["_input_error"] = f"Batch line {line_number} id must be a string or integer."
+        if operation_id in seen_ids:
+            value["_input_error"] = f"Duplicate batch operation id: {operation_id!r}."
+        seen_ids.add(operation_id)
+        value["id"] = operation_id
+        argv = value.get("argv")
+        if "_input_error" not in value and (
+            not isinstance(argv, list)
+            or not argv
+            or not all(isinstance(item, str) for item in argv)
+        ):
+            value["_input_error"] = (
+                f"Batch line {line_number} needs a non-empty string array in 'argv'."
+            )
+        operations.append(value)
+    return operations
+
+
+def _batch_result(operation: Dict, *, exit_code: int, **fields) -> Dict:
+    result = {
+        "id": operation.get("id"),
+        "ok": exit_code == EXIT_OK,
+        "exit_code": exit_code,
+    }
+    argv = operation.get("argv")
+    if isinstance(argv, list) and argv:
+        result["command"] = argv[0]
+    result.update(fields)
+    return result
+
+
+def _batch_option_present(argv: List[str], option: str) -> bool:
+    return any(token == option or token.startswith(f"{option}=") for token in argv)
+
+
+def _execute_batch_operation(operation: Dict, batch_args) -> Dict:
+    started = time.perf_counter()
+    if operation.get("_input_error"):
+        return _batch_result(
+            operation,
+            exit_code=EXIT_USER_ERROR,
+            error=operation["_input_error"],
+            duration_ms=0,
+        )
+
+    argv = list(operation["argv"])
+    command = argv[0]
+    if command in _BATCH_DISALLOWED_COMMANDS:
+        return _batch_result(
+            operation,
+            exit_code=EXIT_USER_ERROR,
+            error=f"Command {command!r} is not allowed inside a batch.",
+            duration_ms=0,
+        )
+    for option in ("--id", "--binary", "--backend"):
+        if _batch_option_present(argv, option):
+            return _batch_result(
+                operation,
+                exit_code=EXIT_USER_ERROR,
+                error=f"Batch operations inherit the batch target; remove {option}.",
+                duration_ms=0,
+            )
+    for option in ("--raw", "--help", "-h"):
+        if _batch_option_present(argv, option):
+            return _batch_result(
+                operation,
+                exit_code=EXIT_USER_ERROR,
+                error=f"{option} is not allowed inside a structured batch.",
+                duration_ms=0,
+            )
+
+    if not _batch_option_present(argv, "--json"):
+        argv.append("--json")
+    stdout = StringIO()
+    stderr = StringIO()
+    exit_code = EXIT_OK
+    error = None
+    result_payload = None
+    try:
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            operation_args = build_parser().parse_args(argv)
+            if operation_args.cmd in _BATCH_DISALLOWED_COMMANDS:
+                raise SystemExit(
+                    f"Command {operation_args.cmd!r} is not allowed inside a batch."
+                )
+            for attr in ("id", "binary", "backend"):
+                if hasattr(operation_args, attr):
+                    setattr(operation_args, attr, getattr(batch_args, attr, None))
+            exit_code = operation_args.func(operation_args) or EXIT_OK
+    except SystemExit as exc:
+        exit_code = exc.code if isinstance(exc.code, int) else EXIT_USER_ERROR
+        if not isinstance(exc.code, int):
+            error = str(exc.code)
+    except NotImplementedError as exc:
+        exit_code = EXIT_UNSUPPORTED
+        error = str(exc) or "not implemented for this backend"
+    except Exception as exc:  # noqa: BLE001
+        exit_code = EXIT_RUNTIME_ERROR
+        error = f"{type(exc).__name__}: {exc}"
+
+    stdout_value = stdout.getvalue().strip()
+    stderr_value = stderr.getvalue().strip()
+    if stdout_value:
+        try:
+            result_payload = json.loads(stdout_value)
+        except json.JSONDecodeError:
+            result_payload = stdout_value
+    fields = {"duration_ms": round((time.perf_counter() - started) * 1000)}
+    if result_payload is not None:
+        fields["result"] = result_payload
+    if stderr_value:
+        fields["stderr"] = stderr_value
+    if error:
+        fields["error"] = error
+    return _batch_result(operation, exit_code=exit_code, **fields)
+
+
+def cmd_batch(args) -> int:
+    operations = _read_batch_operations(args)
+    if not operations:
+        raise SystemExit("Batch input contained no operations.")
+    results = []
+    with _with_client(args) as client:
+        token = _BATCH_CLIENT.set(client)
+        try:
+            for operation in operations:
+                result = _execute_batch_operation(operation, args)
+                results.append(result)
+                if args.stop_on_error and not result["ok"]:
+                    break
+        finally:
+            _BATCH_CLIENT.reset(token)
+
+    failures = sum(not result["ok"] for result in results)
+    summary = {
+        "requested": len(operations),
+        "completed": len(results),
+        "failed": failures,
+        "stopped_early": len(results) < len(operations),
+    }
+    if args.json:
+        print(json.dumps({"results": results, "summary": summary}, indent=2, default=str))
+    else:
+        for result in results:
+            print(json.dumps(result, separators=(",", ":"), default=str))
+        print(json.dumps({"summary": summary}, separators=(",", ":")))
+    return EXIT_OK if failures == 0 else EXIT_USER_ERROR
 
 
 # ---------------------------------------------------------------------------
@@ -2202,6 +2417,23 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Print just the registry directory path and exit.")
     _add_output_args(p_list)
     p_list.set_defaults(func=cmd_list)
+
+    # batch
+    p_batch = sub.add_parser(
+        "batch",
+        help="Execute JSONL CLI operations through one server connection.",
+    )
+    source = p_batch.add_mutually_exclusive_group(required=True)
+    source.add_argument("--file", metavar="PATH", help="Read JSONL operations from PATH.")
+    source.add_argument("--stdin", action="store_true", help="Read JSONL operations from stdin.")
+    p_batch.add_argument(
+        "--stop-on-error",
+        action="store_true",
+        help="Stop after the first failed operation (default: continue).",
+    )
+    _add_server_filter_args(p_batch)
+    _add_output_args(p_batch)
+    p_batch.set_defaults(func=cmd_batch)
 
     # list_functions
     p_lf = sub.add_parser("list_functions", help="List functions in the binary.")
