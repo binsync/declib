@@ -137,7 +137,7 @@ same binary.
 | `stop` | Shut down one or all servers. `--save` flushes analysis to disk first; `--discard` drops unsaved edits. | `--id`, `--binary`, `--all`, `--save`, `--discard`, `--json` |
 | `save` | Persist backend analysis to disk so renames/types/comments survive a reload. | `--path`, `--id`, `--binary`, `--backend`, `--json` |
 | `list_functions` | Enumerate every function (ADDR, SIZE, NAME). | `--filter REGEX`, `--json` |
-| `decompile <target>` | Pseudocode for a function (name or address). | `--raw`, `--id`, `--binary`, `--backend`, `--json` |
+| `decompile <target>` | Pseudocode for a function (name or address). | `--raw`, `--map-lines`, `--lines`, `--grep`, `--context`, `--max-chars`, `--output`, `--json` |
 | `disassemble <target>` | Assembly for a function. | `--raw`, same |
 | `xref_to <target>` | Every reference (code + data) to the target. | `--decompile`, same |
 | `xref_from <target>` | Functions that `target` calls. | same |
@@ -466,6 +466,26 @@ decompiler decompile main --map-lines --json
 Lines can map to multiple instructions, and presentation-only lines may have
 no mapping. `--map-lines` requires `--json` and cannot be combined with
 `--raw`.
+
+Never send a giant function to model context repeatedly. Shape one
+decompilation at the CLI:
+
+```bash
+# Inspect one or several 1-based inclusive source ranges.
+decompiler decompile processClientInput --lines 1450:1700 --json
+
+# Search pseudocode and include nearby control flow.
+decompiler decompile processClientInput \
+  --grep 'firmware|readlog' --context 8 --ignore-case --json
+
+# Save the complete result once; the response contains path/hash/size, not text.
+decompiler decompile processClientInput --output /tmp/processClientInput.c --json
+```
+
+Shaped JSON reports original and output sizes, source ranges, match lines, and
+whether `--max-chars` truncated the result. Repeat `--lines` or `--grep` in one
+request instead of decompiling the same function again. Existing output files
+require `--force-output` before they are overwritten.
 
 ## Gotchas and tips
 
