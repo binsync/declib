@@ -239,6 +239,17 @@ class _CLIBackendTestBase(unittest.TestCase):
         self.assertNotIn('\\n', raw.stdout)
         self.assertNotIn('{"addr"', raw.stdout)
 
+    def test_decompile_line_range(self):
+        self._load_fauxware()
+        name = self._resolve_main_name()
+        result = _run_cli("decompile", name, "--lines", "1:2", "--json")
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["bounded"])
+        self.assertFalse(payload["truncated"])
+        self.assertLessEqual(payload["output_lines"], 2)
+        self.assertEqual(payload["source_ranges"], [{"start": 1, "end": 2}])
+        self.assertLessEqual(payload["output_chars"], payload["total_chars"])
+
     def test_decompile_line_map(self):
         self._load_fauxware()
         name = self._resolve_main_name()
@@ -1531,6 +1542,125 @@ class TestCLIFormatters(unittest.TestCase):
             payload["line_map"],
             [{"line": 2, "addrs": [0x1008, 0x1010], "addrs_hex": ["0x1008", "0x1010"]}],
         )
+
+    def test_parse_and_shape_line_ranges(self):
+        from declib.cli.decompiler_cli import (
+            _parse_line_range_specs,
+            _shape_decompilation_text,
+        )
+
+        ranges = _parse_line_range_specs(["2:3", "5:"])
+        shaped = _shape_decompilation_text(
+            "one\ntwo\nthree\nfour\nfive\n",
+            line_ranges=ranges,
+        )
+        self.assertEqual(shaped["text"], "two\nthree\nfive\n")
+        self.assertEqual(
+            shaped["source_ranges"],
+            [{"start": 2, "end": 3}, {"start": 5, "end": 5}],
+        )
+        self.assertEqual(shaped["total_lines"], 5)
+        self.assertTrue(shaped["bounded"])
+        self.assertFalse(shaped["truncated"])
+
+    def test_shape_grep_context_and_character_limit(self):
+        from declib.cli.decompiler_cli import (
+            _compile_grep_patterns,
+            _shape_decompilation_text,
+        )
+
+        patterns = _compile_grep_patterns(["firmware", "ADMIN"], ignore_case=True)
+        shaped = _shape_decompilation_text(
+            "zero\none\nfirmware check\nthree\nadmin path\nfive\n",
+            grep_patterns=patterns,
+            context=1,
+            max_chars=24,
+        )
+        self.assertEqual(shaped["matched_lines"], [3, 5])
+        self.assertEqual(shaped["source_ranges"], [{"start": 2, "end": 4}])
+        self.assertEqual(shaped["text"], "one\nfirmware check\nthree")
+        self.assertTrue(shaped["truncated"])
+        self.assertEqual(shaped["output_chars"], 24)
+
+    def test_invalid_line_ranges_fail_before_decompilation(self):
+        from declib.cli.decompiler_cli import _parse_line_range_specs
+
+        for spec in ("", ":", "0:4", "5:2", "abc"):
+            with self.subTest(spec=spec):
+                with self.assertRaises(SystemExit):
+                    _parse_line_range_specs([spec])
+
+    def test_decompile_output_file_omits_text_and_decompiles_once(self):
+        from declib.artifacts import Decompilation
+        from declib.cli import decompiler_cli
+
+        client = mock.MagicMock()
+        client.functions = {0x1000: SimpleNamespace(name="main")}
+        client.decompile.return_value = Decompilation(
+            addr=0x1000,
+            text="int main(void) {\n  return 0;\n}\n",
+            decompiler="test",
+        )
+        client_context = mock.MagicMock()
+        client_context.__enter__.return_value = client
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "main.c"
+            args = decompiler_cli.build_parser().parse_args(
+                [
+                    "decompile",
+                    "main",
+                    "--grep",
+                    "return",
+                    "--context",
+                    "1",
+                    "--output",
+                    str(output_path),
+                    "--json",
+                ]
+            )
+            stdout = StringIO()
+            with mock.patch.object(
+                decompiler_cli, "_with_client", return_value=client_context
+            ):
+                with redirect_stdout(stdout):
+                    result = decompiler_cli.cmd_decompile(args)
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(output_path.read_text(), "int main(void) {\n  return 0;\n}\n")
+
+        self.assertEqual(result, 0)
+        client.decompile.assert_called_once_with(0x1000, map_lines=False)
+        self.assertNotIn("text", payload)
+        self.assertEqual(payload["output"]["path"], str(output_path.resolve()))
+        self.assertEqual(payload["output"]["bytes"], 31)
+        self.assertEqual(payload["matched_lines"], [2])
+
+    def test_format_line_map_can_filter_selected_source_lines(self):
+        from declib.cli.decompiler_cli import _format_line_map
+
+        formatted = _format_line_map(
+            {1: {0x1000}, 2: {0x1010}, 3: {0x1020}},
+            selected_lines={2, 3},
+        )
+        self.assertEqual([entry["line"] for entry in formatted], [2, 3])
+
+    def test_existing_output_fails_before_connecting_to_backend(self):
+        from declib.cli import decompiler_cli
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "existing.c"
+            output_path.write_text("keep me")
+            args = decompiler_cli.build_parser().parse_args(
+                ["decompile", "main", "--output", str(output_path), "--json"]
+            )
+            with mock.patch.object(decompiler_cli, "_with_client") as connect:
+                with self.assertRaises(SystemExit):
+                    decompiler_cli.cmd_decompile(args)
+
+            connect.assert_not_called()
+            self.assertEqual(output_path.read_text(), "keep me")
+
     def test_wait_for_server_reports_early_child_exit_and_log(self):
         from declib.cli import decompiler_cli
 

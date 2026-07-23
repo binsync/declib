@@ -250,6 +250,8 @@ Decompile a function to pseudocode.
 
 ```bash
 decompiler decompile <target> [--raw | --map-lines --json] \
+  [--lines START:END ... | --grep REGEX ... [--context N] [--ignore-case]] \
+  [--max-chars N] [--output PATH [--force-output]] \
   [--id ID] [--binary PATH] [--backend BACKEND]
 ```
 
@@ -264,9 +266,26 @@ see [Address formats](#address-formats)).
   deterministic `line_map` list. Each record has `line`, sorted integer
   `addrs`, and matching `addrs_hex` values. A line may map to several
   instructions, and some pseudocode lines may have no mapping.
+- **`--lines START:END`** — return only a 1-based inclusive pseudocode line
+  range. Repeat it for multiple ranges; `START:` and `:END` are accepted.
+- **`--grep REGEX`** — return lines matching a regular expression. Repeat it
+  to match any expression. `--context N` adds surrounding lines and
+  `--ignore-case` changes all patterns to case-insensitive matching.
+  `--grep` and `--lines` are mutually exclusive.
+- **`--max-chars N`** — cap the selected pseudocode at exactly `N`
+  characters. Metadata reports whether truncation occurred.
+- **`--output PATH`** — write the selected pseudocode to a UTF-8 file and
+  return only its absolute path, byte count, and SHA-256 digest instead of
+  sending the body to stdout. Existing files are protected unless
+  `--force-output` is supplied.
 
 Default text output is the decompilation. JSON output includes `addr`,
 `addr_hex`, `decompiler`, and `text`, plus `line_map` when requested.
+When any shaping option is used, JSON also includes `total_chars`,
+`total_lines`, `selected_chars`, `output_chars`, `output_lines`,
+`source_ranges`, `matched_lines`, `truncated`, and `bounded`. Line mappings
+are restricted to selected source lines. `--output` replaces `text` with an
+`output` metadata object, keeping large pseudocode out of agent context.
 
 ```json
 {
@@ -278,6 +297,20 @@ Default text output is the decompilation. JSON output includes `addr`,
     {"line": 4, "addrs": [1849], "addrs_hex": ["0x739"]}
   ]
 }
+```
+
+Examples for a very large function:
+
+```bash
+# Inspect a known source region without returning the other 10,000 lines.
+decompiler decompile processClientInput --lines 1450:1700 --json
+
+# Find two concepts and include eight lines of context around every match.
+decompiler decompile processClientInput \
+  --grep 'firmware|readlog' --context 8 --ignore-case --json
+
+# Materialize once for later local rg/sed work; stdout contains metadata only.
+decompiler decompile processClientInput --output /tmp/processClientInput.c --json
 ```
 
 Error messages distinguish three failure modes:

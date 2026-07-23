@@ -36,6 +36,7 @@ Subcommands implemented:
 - install-skill   install the bundled Agent Skill so LLMs learn the CLI
 """
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -559,12 +560,159 @@ def _known_function_addrs(client) -> set:
         return set()
 
 
+def _parse_line_range_specs(specs: Optional[List[str]]) -> List[Tuple[Optional[int], Optional[int]]]:
+    """Parse 1-based inclusive ``START:END`` ranges, allowing either side open."""
+    ranges = []
+    for spec in specs or []:
+        match = re.fullmatch(r"(\d*):(\d*)", spec)
+        if match is None or not any(match.groups()):
+            raise SystemExit(
+                f"Invalid --lines range {spec!r}; use START:END, START:, or :END."
+            )
+        start = int(match.group(1)) if match.group(1) else None
+        end = int(match.group(2)) if match.group(2) else None
+        if start is not None and start < 1:
+            raise SystemExit(f"Invalid --lines range {spec!r}; START must be at least 1.")
+        if end is not None and end < 1:
+            raise SystemExit(f"Invalid --lines range {spec!r}; END must be at least 1.")
+        if start is not None and end is not None and end < start:
+            raise SystemExit(f"Invalid --lines range {spec!r}; END precedes START.")
+        ranges.append((start, end))
+    return ranges
+
+
+def _compile_grep_patterns(patterns: Optional[List[str]], ignore_case: bool) -> List[re.Pattern]:
+    flags = re.IGNORECASE if ignore_case else 0
+    try:
+        return [re.compile(pattern, flags) for pattern in patterns or []]
+    except re.error as exc:
+        raise SystemExit(f"Invalid --grep regular expression: {exc}") from exc
+
+
+def _coalesce_line_numbers(line_numbers) -> List[Dict[str, int]]:
+    """Turn 1-based line numbers into compact inclusive source ranges."""
+    ordered = sorted(set(line_numbers))
+    if not ordered:
+        return []
+    ranges = []
+    start = previous = ordered[0]
+    for line in ordered[1:]:
+        if line == previous + 1:
+            previous = line
+            continue
+        ranges.append({"start": start, "end": previous})
+        start = previous = line
+    ranges.append({"start": start, "end": previous})
+    return ranges
+
+
+def _shape_decompilation_text(
+    text: str,
+    *,
+    line_ranges: Optional[List[Tuple[Optional[int], Optional[int]]]] = None,
+    grep_patterns: Optional[List[re.Pattern]] = None,
+    context: int = 0,
+    max_chars: Optional[int] = None,
+) -> Dict:
+    """Select and bound pseudocode while retaining original source line numbers."""
+    lines = text.splitlines(keepends=True)
+    total_lines = len(lines)
+    selected = set(range(1, total_lines + 1))
+    matched_lines: List[int] = []
+
+    if line_ranges:
+        selected = set()
+        for requested_start, requested_end in line_ranges:
+            start = requested_start or 1
+            end = requested_end or total_lines
+            selected.update(range(start, min(end, total_lines) + 1))
+    elif grep_patterns:
+        selected = set()
+        for line_number, line in enumerate(lines, start=1):
+            if any(pattern.search(line) for pattern in grep_patterns):
+                matched_lines.append(line_number)
+                first = max(1, line_number - context)
+                last = min(total_lines, line_number + context)
+                selected.update(range(first, last + 1))
+
+    chunks = [(line_number, lines[line_number - 1]) for line_number in sorted(selected)]
+    selected_chars = sum(len(chunk) for _, chunk in chunks)
+    used_lines = []
+    output_chunks = []
+    remaining = max_chars
+    for line_number, chunk in chunks:
+        if remaining is not None and remaining <= 0:
+            break
+        if remaining is not None and len(chunk) > remaining:
+            output_chunks.append(chunk[:remaining])
+            used_lines.append(line_number)
+            remaining = 0
+            break
+        output_chunks.append(chunk)
+        used_lines.append(line_number)
+        if remaining is not None:
+            remaining -= len(chunk)
+
+    output_text = "".join(output_chunks)
+    return {
+        "text": output_text,
+        "total_chars": len(text),
+        "total_lines": total_lines,
+        "selected_chars": selected_chars,
+        "output_chars": len(output_text),
+        "output_lines": len(output_text.splitlines()),
+        "source_ranges": _coalesce_line_numbers(used_lines),
+        "matched_lines": matched_lines,
+        "truncated": len(output_text) < selected_chars,
+        "bounded": bool(line_ranges or grep_patterns or max_chars is not None),
+        "selected_source_lines": set(used_lines),
+    }
+
+
+def _prepare_decompilation_output(path_value: str, force: bool) -> Path:
+    path = Path(path_value).expanduser().resolve()
+    if path.exists() and not force:
+        raise SystemExit(f"Output path already exists: {path}. Pass --force-output to overwrite it.")
+    return path
+
+
+def _write_decompilation_output(path: Path, text: str) -> Dict:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = text.encode("utf-8")
+    path.write_bytes(encoded)
+    return {
+        "path": str(path),
+        "bytes": len(encoded),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
 def cmd_decompile(args) -> int:
     if args.map_lines and (args.raw or not args.json):
         raise SystemExit(
             "decompiler decompile: --map-lines requires --json and cannot "
             "be combined with --raw"
         )
+    if args.output and args.raw:
+        raise SystemExit("decompiler decompile: --output cannot be combined with --raw")
+    if args.force_output and not args.output:
+        raise SystemExit("decompiler decompile: --force-output requires --output")
+    if args.context < 0:
+        raise SystemExit("decompiler decompile: --context must be zero or greater")
+    if args.context and not args.grep:
+        raise SystemExit("decompiler decompile: --context requires --grep")
+    if args.ignore_case and not args.grep:
+        raise SystemExit("decompiler decompile: --ignore-case requires --grep")
+    if args.max_chars is not None and args.max_chars < 1:
+        raise SystemExit("decompiler decompile: --max-chars must be at least 1")
+
+    line_ranges = _parse_line_range_specs(args.lines)
+    grep_patterns = _compile_grep_patterns(args.grep, args.ignore_case)
+    output_path = (
+        _prepare_decompilation_output(args.output, args.force_output)
+        if args.output
+        else None
+    )
 
     with _with_client(args) as client:
         addr = _resolve_function_addr(client, args.target)
@@ -586,17 +734,46 @@ def cmd_decompile(args) -> int:
                 "function (unreachable code, ARM/x86 mode mismatch, etc.)."
             )
         text = dec.text if hasattr(dec, "text") else str(dec)
+        shaped = _shape_decompilation_text(
+            text,
+            line_ranges=line_ranges,
+            grep_patterns=grep_patterns,
+            context=args.context,
+            max_chars=args.max_chars,
+        )
+        output_text = shaped.pop("text")
+        selected_source_lines = shaped.pop("selected_source_lines")
+        output = None
+        if output_path is not None:
+            output = _write_decompilation_output(output_path, output_text)
         if getattr(args, "raw", False):
             # --raw: dump just the text body to stdout, regardless of --json.
-            print(text)
+            print(output_text, end="" if output_text.endswith("\n") else "\n")
             return 0
         out = {
             "addr": addr,
             "decompiler": dec.decompiler if hasattr(dec, "decompiler") else None,
-            "text": text,
         }
+        shaping_requested = bool(
+            args.lines or args.grep or args.max_chars is not None or args.output
+        )
+        if output is None:
+            out["text"] = output_text
+        else:
+            out["output"] = output
+        if shaping_requested:
+            out.update(shaped)
         if args.map_lines:
-            out["line_map"] = _format_line_map(getattr(dec, "line_map", None))
+            out["line_map"] = _format_line_map(
+                getattr(dec, "line_map", None),
+                selected_lines=selected_source_lines if shaping_requested else None,
+            )
+        if output is not None and not args.json:
+            print(
+                f"Wrote {output['bytes']} bytes to {output['path']} "
+                f"(sha256 {output['sha256']})"
+            )
+            return 0
         _emit(args, out, text_field="text")
     return 0
 
@@ -1905,7 +2082,7 @@ def _format_addr_hex(value: int) -> str:
     return f"0x{value:x}"
 
 
-def _format_line_map(line_map) -> List[Dict]:
+def _format_line_map(line_map, selected_lines=None) -> List[Dict]:
     """Render a decompilation line map as stable, JSON-friendly records.
 
     Backend artifacts use ``dict[int, set[int]]`` (with a few backends
@@ -1915,6 +2092,8 @@ def _format_line_map(line_map) -> List[Dict]:
     """
     records: List[Dict] = []
     for line, raw_addrs in sorted((line_map or {}).items(), key=lambda item: int(item[0])):
+        if selected_lines is not None and int(line) not in selected_lines:
+            continue
         if isinstance(raw_addrs, int):
             raw_addrs = [raw_addrs]
         addrs = sorted({int(addr) for addr in raw_addrs})
@@ -2070,6 +2249,48 @@ def build_parser() -> argparse.ArgumentParser:
             "Include backend pseudocode-line to instruction-address mappings "
             "in JSON output (requires --json)."
         ),
+    )
+    selection = p_dec.add_mutually_exclusive_group()
+    selection.add_argument(
+        "--lines",
+        action="append",
+        metavar="START:END",
+        help=(
+            "Return 1-based inclusive pseudocode line ranges. Repeat for "
+            "multiple ranges; START or END may be omitted."
+        ),
+    )
+    selection.add_argument(
+        "--grep",
+        action="append",
+        metavar="REGEX",
+        help="Return lines matching a regex. Repeat to match any regex.",
+    )
+    p_dec.add_argument(
+        "--context",
+        type=int,
+        default=0,
+        help="Include N surrounding lines for each --grep match (default: 0).",
+    )
+    p_dec.add_argument(
+        "--ignore-case",
+        action="store_true",
+        help="Match --grep patterns case-insensitively.",
+    )
+    p_dec.add_argument(
+        "--max-chars",
+        type=int,
+        help="Limit shaped pseudocode to at most N characters.",
+    )
+    p_dec.add_argument(
+        "--output",
+        metavar="PATH",
+        help="Write shaped pseudocode to PATH and return only file metadata.",
+    )
+    p_dec.add_argument(
+        "--force-output",
+        action="store_true",
+        help="Allow --output to overwrite an existing file.",
     )
     _add_server_filter_args(p_dec)
     _add_output_args(p_dec)
