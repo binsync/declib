@@ -84,9 +84,16 @@ _BATCH_DISALLOWED_COMMANDS = {
 def _configure_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.WARNING
     logging.basicConfig(level=level, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    declib_logger = logging.getLogger("declib")
+    # The declib package installs a console handler on sys.stdout, but the CLI
+    # reserves stdout for command payloads (JSON/text) — a stray log line there
+    # breaks `--json` consumers. Push all log chatter to stderr.
+    for handler in declib_logger.handlers:
+        if isinstance(handler, logging.StreamHandler) and getattr(handler, "stream", None) is sys.stdout:
+            handler.setStream(sys.stderr)
     # Keep declib chatter quiet unless --verbose; otherwise INFO logs clobber the CLI output.
     if not verbose:
-        logging.getLogger("declib").setLevel(logging.WARNING)
+        declib_logger.setLevel(logging.WARNING)
 
 
 def _parse_target(target: str) -> Tuple[Optional[int], Optional[str]]:

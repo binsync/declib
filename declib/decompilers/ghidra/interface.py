@@ -274,16 +274,19 @@ class GhidraDecompilerInterface(DecompilerInterface):
             linenum_to_addr[1].add(function.addr)
             pp = PrettyPrinter(g_func, dec_results.getCCodeMarkup(), None)
             for line in pp.getLines():
-                ln = line.getLineNumber()
+                # Coerce jpype Java numbers to plain ints — the Decompilation is
+                # pickled across the server/client boundary, and Java objects
+                # cannot be unpickled in the JVM-less client process.
+                ln = int(line.getLineNumber())
                 for i in range(line.getNumTokens()):
                     min_addr = line.getToken(i).getMinAddress()
                     if min_addr is None:
                         continue
 
-                    linenum_to_addr[ln].add(min_addr.offset)
+                    linenum_to_addr[ln].add(int(min_addr.offset))
                     max_addr = line.getToken(i).getMaxAddress()
                     if max_addr is not None:
-                        linenum_to_addr[ln].add(max_addr.offset)
+                        linenum_to_addr[ln].add(int(max_addr.offset))
 
             decompilation.line_map = {
                 k: list(v) for k, v in dict(linenum_to_addr).items()
