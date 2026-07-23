@@ -187,6 +187,39 @@ ID           BACKEND  PID      BINARY
   scripting manual cleanup).
 - **`--json`** emits `{"registry_dir": "...", "servers": [...]}`.
 
+### `batch`
+
+Execute several structured CLI operations over one persistent server
+connection. This avoids a new Python process, registry lookup, and socket
+handshake for every operation.
+
+```bash
+decompiler batch --file operations.jsonl [--id ID | --binary PATH | --backend BACKEND] [--stop-on-error] [--json]
+decompiler batch --stdin [--id ID | --binary PATH | --backend BACKEND] [--stop-on-error] [--json]
+```
+
+The input is JSON Lines: one object with a unique optional `id` and a CLI
+argument array per line.
+
+```jsonl
+{"id":"functions","argv":["list_functions","--filter","main|auth"]}
+{"id":"main","argv":["decompile","main"]}
+{"id":"header","argv":["read_memory","0","4","--format","hex"]}
+```
+
+Choose the server on the outer `batch` command. Operations inherit that
+target and must not contain their own `--id`, `--binary`, or `--backend`.
+Server lifecycle commands (`load`, `list`, `stop`, `sync`, and nested
+`batch`) and unstructured `--raw` output are rejected inside a batch; normal
+inspection and mutation commands, including `save`, are supported.
+
+By default, output is compact JSONL: one result per completed operation and a
+final summary line. `--json` emits one pretty JSON envelope with `results`
+and `summary`. Each result includes the operation ID, command, exit status,
+duration, and parsed JSON result or error. Processing continues after an
+error unless `--stop-on-error` is set, and the batch exits nonzero if any
+completed operation failed.
+
 ### `stop`
 
 Stop one or all servers.
