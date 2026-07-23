@@ -34,6 +34,11 @@ Subcommands implemented:
 - get_callers     functions (call sites only) that call a target
 - read            typed reads: int/string/struct at an address
 - read_memory     read raw bytes from the binary at an address
+- class           list/source/xrefs for managed-code classes
+- method          list/source/xrefs for managed-code methods
+- field           list/xrefs for managed-code fields
+- resource        list/get Android and JVM resources
+- manifest        print the decoded Android manifest
 - install-skill   install the bundled Agent Skill so LLMs learn the CLI
 """
 import argparse
@@ -2262,6 +2267,109 @@ def cmd_install_skill(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# managed code (JVM / Dex)
+# ---------------------------------------------------------------------------
+
+def _emit_managed_source(args, payload: Dict) -> int:
+    text = payload.get("text", "")
+    if args.max_chars is not None:
+        if args.max_chars < 1:
+            raise SystemExit("--max-chars must be at least 1")
+        shaped = _shape_decompilation_text(text, max_chars=args.max_chars)
+        text = shaped.pop("text")
+        shaped.pop("selected_source_lines")
+        payload = {**payload, "text": text, **shaped}
+    if args.raw:
+        print(text, end="" if text.endswith("\n") else "\n")
+    else:
+        _emit(args, payload, text_field="text")
+    return 0
+
+
+def cmd_managed_class(args) -> int:
+    with _with_client(args) as client:
+        if args.managed_action == "list":
+            _emit_list(
+                args,
+                client.managed_list_classes(filter=args.filter, limit=args.limit),
+            )
+            return 0
+        if args.managed_action == "source":
+            return _emit_managed_source(args, client.managed_class_source(args.ref))
+        if args.managed_action == "xrefs":
+            _emit_list(args, client.managed_class_xrefs(args.ref))
+            return 0
+    raise SystemExit(f"Unknown class action: {args.managed_action}")
+
+
+def cmd_managed_method(args) -> int:
+    with _with_client(args) as client:
+        if args.managed_action == "list":
+            _emit_list(
+                args,
+                client.managed_list_methods(
+                    class_ref=args.class_ref,
+                    filter=args.filter,
+                    limit=args.limit,
+                ),
+            )
+            return 0
+        if args.managed_action == "source":
+            return _emit_managed_source(args, client.managed_method_source(args.ref))
+        if args.managed_action == "xrefs":
+            _emit(
+                args,
+                client.managed_method_xrefs(args.ref, direction=args.direction),
+            )
+            return 0
+    raise SystemExit(f"Unknown method action: {args.managed_action}")
+
+
+def cmd_managed_field(args) -> int:
+    with _with_client(args) as client:
+        if args.managed_action == "list":
+            _emit_list(
+                args,
+                client.managed_list_fields(
+                    class_ref=args.class_ref,
+                    filter=args.filter,
+                    limit=args.limit,
+                ),
+            )
+            return 0
+        if args.managed_action == "xrefs":
+            _emit_list(args, client.managed_field_xrefs(args.ref))
+            return 0
+    raise SystemExit(f"Unknown field action: {args.managed_action}")
+
+
+def cmd_managed_resource(args) -> int:
+    with _with_client(args) as client:
+        if args.managed_action == "list":
+            _emit_list(
+                args,
+                client.managed_list_resources(filter=args.filter, limit=args.limit),
+            )
+            return 0
+        if args.managed_action == "get":
+            payload = client.managed_get_resource(
+                args.path,
+                max_bytes=args.max_bytes,
+            )
+            if "text" in payload:
+                return _emit_managed_source(args, payload)
+            _emit(args, payload)
+            return 0
+    raise SystemExit(f"Unknown resource action: {args.managed_action}")
+
+
+def cmd_managed_manifest(args) -> int:
+    with _with_client(args) as client:
+        payload = client.managed_get_manifest()
+        return _emit_managed_source(args, payload)
+
+
+# ---------------------------------------------------------------------------
 # shared helpers
 # ---------------------------------------------------------------------------
 
@@ -2375,6 +2483,17 @@ def _add_output_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--json", action="store_true", help="Emit JSON output instead of text.")
 
 
+def _add_managed_source_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--raw", action="store_true", help="Print only source text.")
+    p.add_argument(
+        "--max-chars",
+        type=int,
+        help="Limit returned source to at most N characters.",
+    )
+    _add_server_filter_args(p)
+    _add_output_args(p)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="decompiler",
@@ -2448,6 +2567,125 @@ def build_parser() -> argparse.ArgumentParser:
     _add_server_filter_args(p_lf)
     _add_output_args(p_lf)
     p_lf.set_defaults(func=cmd_list_functions)
+
+    # managed-code classes
+    p_class = sub.add_parser(
+        "class",
+        help="Inspect classes in a JVM/Dex backend such as JADX.",
+    )
+    class_sub = p_class.add_subparsers(dest="managed_action", required=True)
+
+    p_class_list = class_sub.add_parser("list", help="List classes.")
+    p_class_list.add_argument("--filter", help="Case-insensitive regex filter.")
+    p_class_list.add_argument("--limit", type=int, default=1000)
+    _add_server_filter_args(p_class_list)
+    _add_output_args(p_class_list)
+    p_class_list.set_defaults(func=cmd_managed_class)
+
+    p_class_source = class_sub.add_parser("source", help="Decompile a class.")
+    p_class_source.add_argument("ref", help="Stable class reference from `class list`.")
+    _add_managed_source_args(p_class_source)
+    p_class_source.set_defaults(func=cmd_managed_class)
+
+    p_class_xrefs = class_sub.add_parser("xrefs", help="List references to a class.")
+    p_class_xrefs.add_argument("ref", help="Stable class reference from `class list`.")
+    _add_server_filter_args(p_class_xrefs)
+    _add_output_args(p_class_xrefs)
+    p_class_xrefs.set_defaults(func=cmd_managed_class)
+
+    # managed-code methods
+    p_method = sub.add_parser(
+        "method",
+        help="Inspect methods in a JVM/Dex backend such as JADX.",
+    )
+    method_sub = p_method.add_subparsers(dest="managed_action", required=True)
+
+    p_method_list = method_sub.add_parser("list", help="List methods.")
+    p_method_list.add_argument(
+        "--class",
+        dest="class_ref",
+        help="Restrict to a stable class reference.",
+    )
+    p_method_list.add_argument("--filter", help="Case-insensitive regex filter.")
+    p_method_list.add_argument("--limit", type=int, default=2000)
+    _add_server_filter_args(p_method_list)
+    _add_output_args(p_method_list)
+    p_method_list.set_defaults(func=cmd_managed_method)
+
+    p_method_source = method_sub.add_parser("source", help="Decompile a method.")
+    p_method_source.add_argument(
+        "ref",
+        help="Full stable method reference from `method list`, including descriptor.",
+    )
+    _add_managed_source_args(p_method_source)
+    p_method_source.set_defaults(func=cmd_managed_method)
+
+    p_method_xrefs = method_sub.add_parser(
+        "xrefs",
+        help="List callers and/or callees of a method.",
+    )
+    p_method_xrefs.add_argument(
+        "ref",
+        help="Full stable method reference from `method list`, including descriptor.",
+    )
+    p_method_xrefs.add_argument(
+        "--direction",
+        choices=["callers", "callees", "both"],
+        default="both",
+    )
+    _add_server_filter_args(p_method_xrefs)
+    _add_output_args(p_method_xrefs)
+    p_method_xrefs.set_defaults(func=cmd_managed_method)
+
+    # managed-code fields
+    p_field = sub.add_parser(
+        "field",
+        help="Inspect fields in a JVM/Dex backend such as JADX.",
+    )
+    field_sub = p_field.add_subparsers(dest="managed_action", required=True)
+
+    p_field_list = field_sub.add_parser("list", help="List fields.")
+    p_field_list.add_argument("--class", dest="class_ref", help="Restrict to a class.")
+    p_field_list.add_argument("--filter", help="Case-insensitive regex filter.")
+    p_field_list.add_argument("--limit", type=int, default=2000)
+    _add_server_filter_args(p_field_list)
+    _add_output_args(p_field_list)
+    p_field_list.set_defaults(func=cmd_managed_field)
+
+    p_field_xrefs = field_sub.add_parser("xrefs", help="List references to a field.")
+    p_field_xrefs.add_argument("ref", help="Stable field reference from `field list`.")
+    _add_server_filter_args(p_field_xrefs)
+    _add_output_args(p_field_xrefs)
+    p_field_xrefs.set_defaults(func=cmd_managed_field)
+
+    # managed-code resources and Android manifest
+    p_resource = sub.add_parser(
+        "resource",
+        help="Inspect Android/JVM resources in a managed-code backend.",
+    )
+    resource_sub = p_resource.add_subparsers(dest="managed_action", required=True)
+
+    p_resource_list = resource_sub.add_parser("list", help="List resources.")
+    p_resource_list.add_argument("--filter", help="Case-insensitive regex filter.")
+    p_resource_list.add_argument("--limit", type=int, default=2000)
+    _add_server_filter_args(p_resource_list)
+    _add_output_args(p_resource_list)
+    p_resource_list.set_defaults(func=cmd_managed_resource)
+
+    p_resource_get = resource_sub.add_parser("get", help="Decode a resource.")
+    p_resource_get.add_argument("path", help="Resource path from `resource list`.")
+    p_resource_get.add_argument(
+        "--max-bytes",
+        type=int,
+        default=1024 * 1024,
+        help="Maximum decoded bytes returned for a binary resource (default: 1 MiB).",
+    )
+    _add_managed_source_args(p_resource_get)
+    p_resource_get.set_defaults(func=cmd_managed_resource)
+
+    p_manifest = sub.add_parser("manifest", help="Decode the Android manifest.")
+    _add_managed_source_args(p_manifest)
+    p_manifest.set_defaults(func=cmd_managed_manifest)
 
     # stop
     p_stop = sub.add_parser("stop", help="Stop a running server.")

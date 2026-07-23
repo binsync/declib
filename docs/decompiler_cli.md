@@ -65,6 +65,10 @@ Pick a backend you have available:
 - **ghidra** — requires `GHIDRA_INSTALL_DIR` and uses PyGhidra.
 - **binja** — requires a Binary Ninja license.
 - **ida** — requires IDA Pro.
+- **jadx** — requires Java 17+ and Gradle for the first worker build. It uses
+  stable JVM/Dex references and has dedicated `class`, `method`, `field`,
+  `resource`, and `manifest` commands; see the
+  [JADX backend guide](./jadx.md).
 
 ---
 
@@ -128,7 +132,7 @@ Load a binary, starting a headless server if one isn't already running for
 it.
 
 ```bash
-decompiler load <binary> [--backend {angr,ghidra,binja,ida}]
+decompiler load <binary> [--backend {angr,ghidra,binja,ida,jadx}]
                          [--id SERVER_ID]
                          [--force | --replace]
                          [--timeout SECONDS]
@@ -684,7 +688,7 @@ to know which one to talk to. Narrow with any combination of:
 - **`--id <SERVER_ID>`** — exact match.
 - **`--binary <PATH>`** — match by binary path (resolved to an absolute
   path).
-- **`--backend <angr|ghidra|binja|ida>`** — match by backend.
+- **`--backend <angr|ghidra|binja|ida|jadx>`** — match by backend.
 
 If zero servers match, the CLI errors out and tells you to run
 `decompiler load`. If multiple match, it prints a disambiguation list:

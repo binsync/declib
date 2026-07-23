@@ -573,6 +573,100 @@ class DecompilerClient:
         """Return (lifted_addr, name, library) tuples for imported symbols."""
         return self._send_request({"type": "method_call", "method_name": "list_imports"})
 
+    # Managed-code API (JVM/Dex backends such as JADX). These methods use
+    # opaque stable references rather than native integer addresses.
+    def managed_capabilities(self) -> Dict:
+        return self._send_request({
+            "type": "method_call",
+            "method_name": "managed_capabilities",
+        })
+
+    def managed_list_classes(self, filter=None, limit=1000) -> List[Dict]:
+        return self._send_request({
+            "type": "method_call",
+            "method_name": "managed_list_classes",
+            "kwargs": {"filter": filter, "limit": limit},
+        })
+
+    def managed_list_methods(self, class_ref=None, filter=None, limit=2000) -> List[Dict]:
+        return self._send_request({
+            "type": "method_call",
+            "method_name": "managed_list_methods",
+            "kwargs": {
+                "class_ref": class_ref,
+                "filter": filter,
+                "limit": limit,
+            },
+        })
+
+    def managed_list_fields(self, class_ref=None, filter=None, limit=2000) -> List[Dict]:
+        return self._send_request({
+            "type": "method_call",
+            "method_name": "managed_list_fields",
+            "kwargs": {
+                "class_ref": class_ref,
+                "filter": filter,
+                "limit": limit,
+            },
+        })
+
+    def managed_class_source(self, ref: str) -> Dict:
+        return self._send_request({
+            "type": "method_call",
+            "method_name": "managed_class_source",
+            "args": [ref],
+        })
+
+    def managed_method_source(self, ref: str) -> Dict:
+        return self._send_request({
+            "type": "method_call",
+            "method_name": "managed_method_source",
+            "args": [ref],
+        })
+
+    def managed_class_xrefs(self, ref: str) -> List[Dict]:
+        return self._send_request({
+            "type": "method_call",
+            "method_name": "managed_class_xrefs",
+            "args": [ref],
+        })
+
+    def managed_method_xrefs(self, ref: str, direction="both") -> Dict:
+        return self._send_request({
+            "type": "method_call",
+            "method_name": "managed_method_xrefs",
+            "args": [ref],
+            "kwargs": {"direction": direction},
+        })
+
+    def managed_field_xrefs(self, ref: str) -> List[Dict]:
+        return self._send_request({
+            "type": "method_call",
+            "method_name": "managed_field_xrefs",
+            "args": [ref],
+        })
+
+    def managed_list_resources(self, filter=None, limit=2000) -> List[Dict]:
+        return self._send_request({
+            "type": "method_call",
+            "method_name": "managed_list_resources",
+            "kwargs": {"filter": filter, "limit": limit},
+        })
+
+    def managed_get_resource(self, path: str, max_bytes=1024 * 1024) -> Dict:
+        return self._send_request({
+            "type": "method_call",
+            "method_name": "managed_get_resource",
+            "args": [path],
+            "kwargs": {"max_bytes": max_bytes},
+        })
+
+    def managed_get_manifest(self) -> Dict:
+        return self._send_request({
+            "type": "method_call",
+            "method_name": "managed_get_manifest",
+        })
+
     def backend_eval(self, code: str, mode: str = "eval") -> Dict:
         """UNSAFE: run arbitrary Python in the backend process. See the interface docstring."""
         return self._send_request({"type": "method_call", "method_name": "backend_eval", "args": [code], "kwargs": {"mode": mode}})

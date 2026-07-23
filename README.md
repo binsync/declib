@@ -19,6 +19,8 @@ The minimum Python version is **3.10**.
 - Binary Ninja: **>= 2.4**
 - angr-management: **>= 9.0**
 - Ghidra: **>= 12.0** (started in PyGhidra mode)
+- JADX: **>= 1.5.6** (headless Java/Android support; see
+  [the JADX backend guide](./docs/jadx.md))
 
 ## Usage
 DecLib exposes all decompiler API through the abstract class `DecompilerInterface`. The `DecompilerInterface` 
@@ -109,4 +111,3 @@ one of the many BinSync projects.
     <br>
     <img src="https://github.com/binsync/binsync/blob/main/assets/images/sponsors/reveng_ai.svg?raw=true" alt="RevEng AI" style="height: 50px; display: inline-block; vertical-align: middle;">
 </p>
-

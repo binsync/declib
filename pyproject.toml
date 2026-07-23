@@ -53,6 +53,11 @@ include-package-data = true
 
 [tool.setuptools.package-data]
 "declib.skills" = ["**/SKILL.md", "**/*.md"]
+"declib.decompilers.jadx.worker" = [
+    "build.gradle.kts",
+    "settings.gradle.kts",
+    "src/main/java/**/*.java",
+]
 
 [tool.setuptools.packages]
 find = {namespaces = false}
