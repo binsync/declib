@@ -1,5 +1,7 @@
+import os
 import shlex
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -112,3 +114,82 @@ for line in sys.stdin:
         }
         with pytest.raises(ValueError, match="bad input"):
             client.call("fail")
+
+
+def test_find_official_jadx_runtime_from_home(tmp_path, monkeypatch):
+    jadx_home = tmp_path / "jadx"
+    jadx_jar = jadx_home / "lib" / "jadx-1.5.6-all.jar"
+    jadx_jar.parent.mkdir(parents=True)
+    jadx_jar.write_bytes(b"test")
+    monkeypatch.setenv("JADX_HOME", str(jadx_home))
+    monkeypatch.delenv("DECLIB_JADX_JAR", raising=False)
+    monkeypatch.setattr("shutil.which", lambda name: None)
+
+    assert JadxWorkerClient.find_jadx_runtime() == (jadx_jar, "1.5.6")
+
+
+def test_find_official_jadx_runtime_rejects_old_version(tmp_path, monkeypatch):
+    jadx_home = tmp_path / "jadx"
+    jadx_jar = jadx_home / "lib" / "jadx-1.5.5-all.jar"
+    jadx_jar.parent.mkdir(parents=True)
+    jadx_jar.write_bytes(b"test")
+    monkeypatch.setenv("JADX_HOME", str(jadx_home))
+    monkeypatch.delenv("DECLIB_JADX_JAR", raising=False)
+    monkeypatch.setattr("shutil.which", lambda name: None)
+
+    with pytest.raises(RuntimeError, match="too old"):
+        JadxWorkerClient.find_jadx_runtime()
+
+
+def test_resolve_command_uses_thin_bridge_and_official_jadx(
+    tmp_path,
+    monkeypatch,
+):
+    java = tmp_path / "java"
+    bridge = tmp_path / "declib-jadx-worker.jar"
+    jadx = tmp_path / "jadx-1.5.6-all.jar"
+    for path in (java, bridge, jadx):
+        path.write_bytes(b"test")
+
+    monkeypatch.delenv("DECLIB_JADX_WORKER", raising=False)
+    monkeypatch.setenv("DECLIB_JADX_WORKER_OPTS", "-Xmx2g")
+    with (
+        patch.object(
+            JadxWorkerClient,
+            "find_jadx_runtime",
+            return_value=(jadx, "1.5.6"),
+        ),
+        patch.object(
+            JadxWorkerClient,
+            "find_java",
+            return_value=(java, 21),
+        ),
+        patch.object(
+            JadxWorkerClient,
+            "find_bridge_jar",
+            return_value=bridge,
+        ),
+    ):
+        command = JadxWorkerClient.resolve_command(build_if_missing=False)
+
+    assert command == [
+        str(java),
+        "-Xmx2g",
+        "-cp",
+        f"{bridge}{os.pathsep}{jadx}",
+        JadxWorkerClient.WORKER_MAIN_CLASS,
+    ]
+
+
+def test_runtime_status_reports_missing_optional_runtime(monkeypatch):
+    monkeypatch.delenv("DECLIB_JADX_WORKER", raising=False)
+    with (
+        patch.object(JadxWorkerClient, "find_bridge_jar", return_value=Path("/bridge.jar")),
+        patch.object(JadxWorkerClient, "find_java", return_value=(Path("/java"), 21)),
+        patch.object(JadxWorkerClient, "find_jadx_runtime", return_value=(None, None)),
+    ):
+        status = JadxWorkerClient.runtime_status()
+
+    assert status["available"] is False
+    assert status["source"] == "official-jadx"
+    assert status["reasons"] == ["official JADX runtime was not found"]

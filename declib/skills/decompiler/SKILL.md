@@ -20,7 +20,10 @@ That's it — the `decompiler` CLI drives every backend headlessly via DecLib
 and does **not** need any plugins installed inside IDA/Ghidra/Binary Ninja
 to run. `angr` needs no host tool at all (it's a pure Python dependency)
 and is the fastest way to verify the pipeline end-to-end.
-JADX requires Java 17+ and Gradle for its automatic first-load worker build.
+JADX is optional and requires the official JADX 1.5.6+ distribution plus
+Java 17+. Check it with `decompiler backend status jadx --json`. DecLib finds
+it through `JADX_HOME` or `jadx` on `PATH`; Gradle is only needed when
+developing DecLib itself from a source checkout.
 
 ## Mental model
 
@@ -38,6 +41,7 @@ classes, methods, and the manifest/resources. Copy complete `ref` values from
 JSON list output; descriptors make overloaded methods unambiguous.
 
 ```bash
+decompiler backend status jadx --json
 decompiler load ./challenge.apk --backend jadx
 decompiler manifest --raw
 decompiler class list --filter 'challenge|MainActivity' --json
@@ -213,6 +217,7 @@ same binary.
 | `exec "<code>"` / `exec --file <p>` | **UNSAFE**: run Python in the backend process. | `--file`, same |
 | `read int/string/struct <addr> [...]` | Typed reads: decode memory as an integer, C string, or defined struct. | `--size`, `--signed`, `--endian`, `--max-len`, `--encoding`, same + `--json` |
 | `read_memory <addr> <size>` | Read raw bytes from the binary at `<addr>`. Default output is a hexdump. | `--format {hexdump,hex,raw}`, same + `--json` (base64-encoded bytes) |
+| `backend status jadx` | Check the optional Java/JADX runtime without loading an input. | `--json` |
 | `install-skill` | Install this file for Claude Code or Codex. | `--agent`, `--dest`, `--force`, `--json` |
 
 ### `xref_to` vs `get_callers`

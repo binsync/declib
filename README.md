@@ -20,7 +20,8 @@ The minimum Python version is **3.10**.
 - angr-management: **>= 9.0**
 - Ghidra: **>= 12.0** (started in PyGhidra mode)
 - JADX: **>= 1.5.6** (headless Java/Android support; see
-  [the JADX backend guide](./docs/jadx.md))
+  [the JADX backend guide](./docs/jadx.md)). JADX is optional and is not
+  bundled with DecLib.
 
 ## Usage
 DecLib exposes all decompiler API through the abstract class `DecompilerInterface`. The `DecompilerInterface` 

@@ -56,7 +56,9 @@ include-package-data = true
 "declib.decompilers.jadx.worker" = [
     "build.gradle.kts",
     "settings.gradle.kts",
+    "bridge/declib-jadx-worker.jar",
     "src/main/java/**/*.java",
+    "src/main/resources/**/*",
 ]
 
 [tool.setuptools.packages]

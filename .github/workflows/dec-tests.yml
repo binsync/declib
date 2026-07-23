@@ -46,6 +46,15 @@ jobs:
       with:
         distribution: "oracle"
         java-version: "21"
+    - name: Set up Gradle
+      uses: gradle/actions/setup-gradle@v4
+      with:
+        gradle-version: "8.12.1"
+    - name: Test the JADX bridge
+      run: |
+        gradle --no-daemon -p declib/decompilers/jadx/worker test stageBridge
+        git diff --exit-code -- declib/decompilers/jadx/worker/bridge/declib-jadx-worker.jar
+        pytest tests/test_jadx.py -v
     - name: Install Ghidra
       uses: antoniovazquezblanco/setup-ghidra@v2.0.12
       with:

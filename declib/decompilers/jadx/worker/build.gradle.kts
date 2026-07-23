@@ -1,3 +1,6 @@
+import org.gradle.api.tasks.Copy
+import org.gradle.jvm.tasks.Jar
+
 plugins {
     application
     java
@@ -36,6 +39,18 @@ application {
 
 tasks.withType<JavaCompile>().configureEach {
     options.release.set(17)
+}
+
+tasks.withType<Jar>().configureEach {
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+
+tasks.register<Copy>("stageBridge") {
+    dependsOn(tasks.jar)
+    from(tasks.jar.flatMap { it.archiveFile })
+    into(layout.projectDirectory.dir("bridge"))
+    rename { "declib-jadx-worker.jar" }
 }
 
 tasks.test {

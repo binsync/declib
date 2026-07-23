@@ -25,10 +25,15 @@ public final class Main {
 
     public static void main(String[] args) throws Exception {
         System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "warn");
+        // Stdout is the JSONL protocol. Capture it for protocol responses, then
+        // redirect any direct or third-party stdout writes to stderr so a JADX
+        // log line can never desynchronize the client.
+        PrintWriter output = new PrintWriter(System.out, true, StandardCharsets.UTF_8);
+        System.setOut(System.err);
         try (JadxService service = new JadxService();
              BufferedReader input = new BufferedReader(
                      new InputStreamReader(System.in, StandardCharsets.UTF_8));
-             PrintWriter output = new PrintWriter(System.out, true, StandardCharsets.UTF_8)) {
+             output) {
             String line;
             while ((line = input.readLine()) != null) {
                 if (line.isBlank()) {

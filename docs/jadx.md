@@ -7,23 +7,28 @@ the worker's standard input and output.
 
 ## Setup
 
-The prototype worker requires Java 17 or newer and Gradle. It is built
-automatically on the first JADX load:
+JADX is optional and is not bundled with DecLib. Install the official JADX
+1.5.6 or newer distribution and Java 17 or newer. DecLib finds JADX through
+`JADX_HOME` or a `jadx` executable on `PATH`:
 
 ```bash
+export JADX_HOME=/opt/jadx
+decompiler backend status jadx --json
 decompiler load ./challenge.apk --backend jadx
 ```
 
-To build it ahead of time:
+Released DecLib wheels contain the small Java bridge used to communicate with
+JADX. Gradle is only needed when developing DecLib from a source checkout and
+the bridge has not been built:
 
 ```bash
-cd declib/decompilers/jadx/worker
-gradle --no-daemon test installDist
+gradle --no-daemon -p declib/decompilers/jadx/worker test jar
 ```
 
-Set `DECLIB_JADX_WORKER` to use a prebuilt worker command. The generated
-launcher accepts additional JVM arguments through
-`DECLIB_JADX_WORKER_OPTS`. Its default maximum heap is 4 GiB:
+Set `DECLIB_JADX_JAR` to select a specific official `jadx-*-all.jar`, or
+`DECLIB_JADX_WORKER` to use a completely custom worker command. Additional
+JVM arguments can be supplied through `DECLIB_JADX_WORKER_OPTS`; the default
+maximum heap is 4 GiB:
 
 ```bash
 export DECLIB_JADX_WORKER_OPTS="-Xmx8g"

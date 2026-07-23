@@ -39,6 +39,7 @@ Subcommands implemented:
 - field           list/xrefs for managed-code fields
 - resource        list/get Android and JVM resources
 - manifest        print the decoded Android manifest
+- backend         inspect optional backend runtime availability
 - install-skill   install the bundled Agent Skill so LLMs learn the CLI
 """
 import argparse
@@ -77,6 +78,7 @@ _SERVER_POLL_INTERVAL = 0.25
 _SERVER_LOG_TAIL_BYTES = 8192
 _BATCH_CLIENT = ContextVar("declib_batch_client", default=None)
 _BATCH_DISALLOWED_COMMANDS = {
+    "backend",
     "batch",
     "install-skill",
     "list",
@@ -2267,6 +2269,22 @@ def cmd_install_skill(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# optional backend runtimes
+# ---------------------------------------------------------------------------
+
+def cmd_backend(args) -> int:
+    if args.backend_action != "status":
+        raise SystemExit(f"Unknown backend action: {args.backend_action}")
+    if args.name == "jadx":
+        from declib.decompilers.jadx.worker_client import JadxWorkerClient
+
+        status = JadxWorkerClient.runtime_status()
+        _emit(args, status)
+        return EXIT_OK if status["available"] else EXIT_NOT_FOUND
+    raise SystemExit(f"Backend runtime status is not implemented for {args.name!r}")
+
+
+# ---------------------------------------------------------------------------
 # managed code (JVM / Dex)
 # ---------------------------------------------------------------------------
 
@@ -2543,6 +2561,20 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Print just the registry directory path and exit.")
     _add_output_args(p_list)
     p_list.set_defaults(func=cmd_list)
+
+    # optional backend runtime diagnostics
+    p_backend = sub.add_parser(
+        "backend",
+        help="Inspect optional backend runtime availability.",
+    )
+    backend_sub = p_backend.add_subparsers(dest="backend_action", required=True)
+    p_backend_status = backend_sub.add_parser(
+        "status",
+        help="Check whether an optional backend runtime is ready.",
+    )
+    p_backend_status.add_argument("name", choices=["jadx"])
+    _add_output_args(p_backend_status)
+    p_backend_status.set_defaults(func=cmd_backend)
 
     # batch
     p_batch = sub.add_parser(
