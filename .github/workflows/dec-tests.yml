@@ -27,14 +27,16 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install .[test]
-    - name: Download BS Artifact & Install IDA
+    - name: Download BS test artifacts
+      run: git clone https://github.com/binsync/bs-artifacts.git /tmp/bs-artifacts
+    - name: Install IDA
+      if: ${{ env.TOOLING_KEY != '' }}
       run: |
-        (git clone https://github.com/binsync/bs-artifacts.git /tmp/bs-artifacts && \
-          cd /tmp/bs-artifacts && \
-          ./helpers/setup_ida_ci.sh)
+        cd /tmp/bs-artifacts
+        ./helpers/setup_ida_ci.sh
     # taken from https://github.com/mandiant/capa/blob/master/.github/workflows/tests.yml#L107-L147
     - name: Install Binary Ninja
-      if: ${{ env.BN_SERIAL != 0 }}
+      if: ${{ env.BN_SERIAL != '' && env.BN_LICENSE != '' }}
       run: |
         mkdir ./.github/binja
         curl "https://raw.githubusercontent.com/Vector35/binaryninja-api/6812c97/scripts/download_headless.py" -o ./.github/binja/download_headless.py
@@ -46,6 +48,15 @@ jobs:
       with:
         distribution: "oracle"
         java-version: "21"
+    - name: Set up Gradle
+      uses: gradle/actions/setup-gradle@v4
+      with:
+        gradle-version: "8.12.1"
+    - name: Test the JADX bridge
+      run: |
+        gradle --no-daemon -p declib/decompilers/jadx/worker test stageBridge
+        git diff --exit-code -- declib/decompilers/jadx/worker/bridge/declib-jadx-worker.jar
+        pytest tests/test_jadx.py -v
     - name: Install Ghidra
       uses: antoniovazquezblanco/setup-ghidra@v2.0.12
       with:
@@ -53,10 +64,8 @@ jobs:
         auth_token: ${{ secrets.GITHUB_TOKEN }}
     - name: Pytest
       run: |
-        # these two test must be run in separate python environments, due to the way ghidra bridge works
-        # you also must run these tests in the exact order shown here
-        TEST_BINARIES_DIR=/tmp/bs-artifacts/binaries pytest \
-          tests/test_decompilers.py \
-          tests/test_client_server.py \
-          tests/test_decompiler_cli.py \
-          -sv
+        tests=(tests/test_client_server.py tests/test_decompiler_cli.py)
+        if [[ -n "$TOOLING_KEY" && -n "$BN_SERIAL" && -n "$BN_LICENSE" ]]; then
+          tests=(tests/test_decompilers.py "${tests[@]}")
+        fi
+        TEST_BINARIES_DIR=/tmp/bs-artifacts/binaries pytest "${tests[@]}" -sv

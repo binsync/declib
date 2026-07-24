@@ -1,12 +1,12 @@
 ---
 name: decompiler
-description: Reverse-engineer and modify binaries with a single `decompiler` CLI that drives IDA Pro, Ghidra, Binary Ninja, or angr via DecLib. Use whenever the user asks to decompile, disassemble, look up cross references, rename functions or variables, define or change types, sync work between decompilers, search strings or functions, or otherwise inspect a binary file. Also use for multi-binary workflows (load several binaries at once and switch between them with --id).
+description: Reverse-engineer and modify native binaries, Java archives, Android APKs, and Dex files with a single `decompiler` CLI that drives IDA Pro, Ghidra, Binary Ninja, angr, or JADX via DecLib. Use whenever the user asks to decompile, disassemble, inspect Java/Android classes or resources, look up cross references, rename functions or variables, define or change types, sync work between decompilers, search strings or functions, or otherwise inspect a binary file. Also use for multi-binary workflows (load several binaries at once and switch between them with --id).
 ---
 
 # `decompiler` — DecLib CLI for LLMs
 
 The `decompiler` command is a thin client that talks to a long-running
-`DecompilerServer` (IDA / Ghidra / Binary Ninja / angr). The first `load` of a
+`DecompilerServer` (IDA / Ghidra / Binary Ninja / angr / JADX). The first `load` of a
 binary spawns a server in the background; every subsequent call reuses that
 server, so repeated `decompile`/`disassemble`/`xref_*` calls are fast.
 
@@ -20,6 +20,10 @@ That's it — the `decompiler` CLI drives every backend headlessly via DecLib
 and does **not** need any plugins installed inside IDA/Ghidra/Binary Ninja
 to run. `angr` needs no host tool at all (it's a pure Python dependency)
 and is the fastest way to verify the pipeline end-to-end.
+JADX is optional and requires the official JADX 1.5.6+ distribution plus
+Java 17+. Check it with `decompiler backend status jadx --json`. DecLib finds
+it through `JADX_HOME` or `jadx` on `PATH`; Gradle is only needed when
+developing DecLib itself from a source checkout.
 
 ## Mental model
 
@@ -28,9 +32,30 @@ and is the fastest way to verify the pipeline end-to-end.
 | **Server** | A headless `declib --server` process holding a single binary open. Identified by a short ID. |
 | **Client** | Every `decompiler <subcommand>` call is a short-lived client that picks a server, does one thing, and exits. |
 | **Registry** | `decompiler list` / the shared registry under the declib state dir. Each record has `id`, `backend`, `binary_path`, `socket_path`, `pid`. Use `decompiler list --show-registry` to print just the path. |
-| **Address form** | Servers expose **lifted** addresses (relative to the binary base). The CLI accepts either lifted (`0x71d`) or absolute (`0x40071d`) and does the conversion. JSON output always includes both `addr` (int) and `addr_hex` (hex string). |
+| **Identity** | Native backends expose **lifted** integer addresses. JADX exposes stable class, field, and full method-descriptor `ref` strings; never treat them as addresses or omit a method descriptor. |
 
 ## First moves on a new binary
+
+For an APK, DEX, AAB, XAPK, JAR, or class file, select JADX and begin with
+classes, methods, and the manifest/resources. Copy complete `ref` values from
+JSON list output; descriptors make overloaded methods unambiguous.
+
+```bash
+decompiler backend status jadx --json
+decompiler load ./challenge.apk --backend jadx
+decompiler manifest --raw
+decompiler class list --filter 'challenge|MainActivity' --json
+decompiler method list --class 'com.example.MainActivity' --json
+decompiler method source \
+  'com.example.MainActivity->checkFlag(Ljava/lang/String;)Z' --raw
+decompiler method xrefs \
+  'com.example.MainActivity->checkFlag(Ljava/lang/String;)Z' --json
+decompiler resource list --filter 'xml|json|assets' --json
+```
+
+JADX xrefs can trigger whole-program usage analysis and consume substantially
+more time and memory than listing or decompiling one class. Use them after
+narrowing to an interesting method.
 
 **Always prefer IDA Pro when it's available** (`--backend ida`) — it
 generally produces the cleanest decompilation and the most accurate type
@@ -134,6 +159,7 @@ decompiler load ./my-binary --backend ida      # PREFERRED: IDA Pro (needs insta
 decompiler load ./my-binary --backend ghidra   # FALLBACK: needs GHIDRA_INSTALL_DIR
 decompiler load ./my-binary --backend angr     # LAST RESORT: pure-Python, always available
 decompiler load ./my-binary --backend binja    # Binary Ninja, needs license
+decompiler load ./challenge.apk --backend jadx # Java/Android managed code
 ```
 
 If the IDA `load` fails (e.g. unsupported file format, decompiler error),
@@ -155,6 +181,11 @@ same binary.
 | `stop` | Shut down one or all servers. `--save` flushes analysis to disk first; `--discard` drops unsaved edits. | `--id`, `--binary`, `--all`, `--save`, `--discard`, `--json` |
 | `save` | Persist backend analysis to disk so renames/types/comments survive a reload. | `--path`, `--id`, `--binary`, `--backend`, `--json` |
 | `list_functions` | Enumerate every function (ADDR, SIZE, NAME). | `--filter REGEX`, `--json` |
+| `class list/source/xrefs` | List, decompile, or find references to managed-code classes. | stable class `ref`, `--filter`, `--max-chars`, `--json` |
+| `method list/source/xrefs` | List, decompile, or find callers/callees for JVM/Dex methods. | full method `ref`, `--class`, `--direction`, `--max-chars`, `--json` |
+| `field list/xrefs` | List managed-code fields or their references. | stable field `ref`, `--class`, `--filter`, `--json` |
+| `resource list/get` | List or decode Android/JVM resources. Binary reads default to at most 1 MiB. | path, `--filter`, `--raw`, `--max-chars`, `--max-bytes`, `--json` |
+| `manifest` | Decode AndroidManifest.xml. | `--raw`, `--max-chars`, `--json` |
 | `decompile <target>` | Pseudocode for a function (name or address). | `--raw`, `--map-lines`, `--lines`, `--grep`, `--context`, `--max-chars`, `--output`, `--json` |
 | `disassemble <target>` | Assembly for a function. | `--raw`, same |
 | `xref_to <target>` | Every reference (code + data) to the target. | `--decompile`, same |
@@ -186,6 +217,7 @@ same binary.
 | `exec "<code>"` / `exec --file <p>` | **UNSAFE**: run Python in the backend process. | `--file`, same |
 | `read int/string/struct <addr> [...]` | Typed reads: decode memory as an integer, C string, or defined struct. | `--size`, `--signed`, `--endian`, `--max-len`, `--encoding`, same + `--json` |
 | `read_memory <addr> <size>` | Read raw bytes from the binary at `<addr>`. Default output is a hexdump. | `--format {hexdump,hex,raw}`, same + `--json` (base64-encoded bytes) |
+| `backend status jadx` | Check the optional Java/JADX runtime without loading an input. | `--json` |
 | `install-skill` | Install this file for Claude Code or Codex. | `--agent`, `--dest`, `--force`, `--json` |
 
 ### `xref_to` vs `get_callers`

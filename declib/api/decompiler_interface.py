@@ -22,7 +22,7 @@ from declib.artifacts import (
     Enum, Struct, FunctionArgument, Context, Decompilation, Typedef
 )
 from declib.decompilers import SUPPORTED_DECOMPILERS, ANGR_DECOMPILER, \
-    BINJA_DECOMPILER, IDA_DECOMPILER, GHIDRA_DECOMPILER
+    BINJA_DECOMPILER, IDA_DECOMPILER, GHIDRA_DECOMPILER, JADX_DECOMPILER
 
 _l = logging.getLogger(name=__name__)
 
@@ -667,6 +667,76 @@ class DecompilerInterface:
         ``NotImplementedError``.
         """
         raise NotImplementedError("Import listing is not implemented for this backend.")
+
+    #
+    # Managed-code API
+    #
+
+    def managed_capabilities(self) -> Dict:
+        """Describe managed-code capabilities and the currently loaded input."""
+        raise NotImplementedError("Managed code is not implemented for this backend.")
+
+    def managed_list_classes(
+        self,
+        filter: Optional[str] = None,
+        limit: int = 1000,
+    ) -> List[Dict]:
+        """List classes using stable opaque references rather than addresses."""
+        raise NotImplementedError("Managed code is not implemented for this backend.")
+
+    def managed_list_methods(
+        self,
+        class_ref: Optional[str] = None,
+        filter: Optional[str] = None,
+        limit: int = 2000,
+    ) -> List[Dict]:
+        """List methods, preserving the full descriptor in each ``ref``."""
+        raise NotImplementedError("Managed code is not implemented for this backend.")
+
+    def managed_list_fields(
+        self,
+        class_ref: Optional[str] = None,
+        filter: Optional[str] = None,
+        limit: int = 2000,
+    ) -> List[Dict]:
+        """List fields using stable opaque references."""
+        raise NotImplementedError("Managed code is not implemented for this backend.")
+
+    def managed_class_source(self, ref: str) -> Dict:
+        """Return decompiled source for a managed-code class."""
+        raise NotImplementedError("Managed code is not implemented for this backend.")
+
+    def managed_method_source(self, ref: str) -> Dict:
+        """Return decompiled source for a managed-code method."""
+        raise NotImplementedError("Managed code is not implemented for this backend.")
+
+    def managed_class_xrefs(self, ref: str) -> List[Dict]:
+        """Return nodes that reference a managed-code class."""
+        raise NotImplementedError("Managed code is not implemented for this backend.")
+
+    def managed_method_xrefs(self, ref: str, direction: str = "both") -> Dict:
+        """Return callers and/or callees for a managed-code method."""
+        raise NotImplementedError("Managed code is not implemented for this backend.")
+
+    def managed_field_xrefs(self, ref: str) -> List[Dict]:
+        """Return nodes that reference a managed-code field."""
+        raise NotImplementedError("Managed code is not implemented for this backend.")
+
+    def managed_list_resources(
+        self,
+        filter: Optional[str] = None,
+        limit: int = 2000,
+    ) -> List[Dict]:
+        """List resources in an Android/JVM input."""
+        raise NotImplementedError("Managed code is not implemented for this backend.")
+
+    def managed_get_resource(self, path: str, max_bytes: int = 1024 * 1024) -> Dict:
+        """Decode a text or binary Android/JVM resource."""
+        raise NotImplementedError("Managed code is not implemented for this backend.")
+
+    def managed_get_manifest(self) -> Dict:
+        """Decode and return AndroidManifest.xml."""
+        raise NotImplementedError("Managed code is not implemented for this backend.")
 
     def backend_eval(self, code: str, mode: str = "eval") -> Dict:
         """UNSAFE escape hatch: run arbitrary Python inside the backend process.
@@ -1426,6 +1496,10 @@ class DecompilerInterface:
             extra_kwargs = {"flat_api": DecompilerInterface._find_global_in_call_frames('__this__')}
             if project_dir:
                 extra_kwargs["project_location"] = project_dir
+        elif current_decompiler == JADX_DECOMPILER:
+            from declib.decompilers.jadx.interface import JadxInterface
+            deci_class = JadxInterface
+            extra_kwargs = {}
         else:
             raise ValueError("Please use DecLib with our supported decompiler set!")
 

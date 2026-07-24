@@ -137,7 +137,7 @@ def main():
         """
     )
     parser.add_argument(
-        "--decompiler", choices=["ida", "ghidra", "binja", "angr"], help="""
+        "--decompiler", choices=["ida", "ghidra", "binja", "angr", "jadx"], help="""
         Force a specific decompiler for the server. If not specified, auto-detection will be used.
         """
     )

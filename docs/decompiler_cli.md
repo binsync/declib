@@ -31,6 +31,7 @@ and can be installed with `decompiler install-skill`.
   - [`rename`](#rename)
   - [`list_strings`](#list_strings)
   - [`get_callers`](#get_callers)
+  - [`backend status`](#backend-status)
   - [`install-skill`](#install-skill)
 - [Server selection (`--id`, `--binary`, `--backend`)](#server-selection)
 - [JSON output (`--json`, `--raw`)](#json-output)
@@ -65,6 +66,12 @@ Pick a backend you have available:
 - **ghidra** — requires `GHIDRA_INSTALL_DIR` and uses PyGhidra.
 - **binja** — requires a Binary Ninja license.
 - **ida** — requires IDA Pro.
+- **jadx** — optional; requires the official JADX 1.5.6+ distribution and
+  Java 17+. DecLib finds it via `JADX_HOME` or `jadx` on `PATH`. Check setup
+  with `decompiler backend status jadx --json`. It uses stable JVM/Dex
+  references and has dedicated `class`, `method`, `field`, `resource`, and
+  `manifest` commands; see the
+  [JADX backend guide](./jadx.md).
 
 ---
 
@@ -128,7 +135,7 @@ Load a binary, starting a headless server if one isn't already running for
 it.
 
 ```bash
-decompiler load <binary> [--backend {angr,ghidra,binja,ida}]
+decompiler load <binary> [--backend {angr,ghidra,binja,ida,jadx}]
                          [--id SERVER_ID]
                          [--force | --replace]
                          [--timeout SECONDS]
@@ -654,6 +661,19 @@ to the backend's lifted form, so both refer to the same byte instead of the
 backend double-adding the image base. An address at or above the image base is
 treated as absolute; a smaller one is already lifted.
 
+### `backend status`
+
+Check whether an optional backend runtime is installed without starting a
+decompiler server:
+
+```bash
+decompiler backend status jadx [--json]
+```
+
+The JSON response reports the bridge JAR, Java runtime, official JADX JAR and
+detected versions. It exits successfully when the backend is ready and exits
+`1` with a `reasons` list when setup is incomplete.
+
 ### `install-skill`
 
 Copy the bundled Agent Skill into a supported agent skill directory so Claude
@@ -684,7 +704,7 @@ to know which one to talk to. Narrow with any combination of:
 - **`--id <SERVER_ID>`** — exact match.
 - **`--binary <PATH>`** — match by binary path (resolved to an absolute
   path).
-- **`--backend <angr|ghidra|binja|ida>`** — match by backend.
+- **`--backend <angr|ghidra|binja|ida|jadx>`** — match by backend.
 
 If zero servers match, the CLI errors out and tells you to run
 `decompiler load`. If multiple match, it prints a disambiguation list:
