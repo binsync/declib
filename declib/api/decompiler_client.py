@@ -428,8 +428,21 @@ class DecompilerClient:
                 # Check if response is an error
                 if isinstance(response, dict) and "error" in response:
                     error_type = response.get("type", "Exception")
-                    error_msg = response.get("error", "Unknown error")
-                    
+                    error_msg = response.get("error", "") or ""
+
+                    # An exception raised without arguments serializes to an
+                    # empty string, which would surface to the caller as a
+                    # blank error. Fall back to the server-side traceback, or
+                    # at minimum name the exception type.
+                    # The reconstructed exception already carries the type, so
+                    # the fallback text does not repeat it.
+                    if not error_msg.strip():
+                        server_tb = (response.get("traceback") or "").strip()
+                        if server_tb:
+                            error_msg = f"(no message); server traceback:\n{server_tb}"
+                        else:
+                            error_msg = "(no message)"
+
                     # Try to reconstruct the original exception type
                     if error_type == "KeyError":
                         raise KeyError(error_msg)
@@ -465,7 +478,11 @@ class DecompilerClient:
                 
                 return response
             except Exception as e:
-                _l.error(f"Request failed: {e} for {request}")
+                # Always name the exception type: str(e) is empty for
+                # exceptions raised without arguments (a reset connection,
+                # for instance), which used to log "Request failed:  for ...".
+                detail = str(e) or "<no message>"
+                _l.error(f"Request failed: {type(e).__name__}: {detail} for {request}")
                 raise
     
     # Properties - mirror DecompilerInterface properties

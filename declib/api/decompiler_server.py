@@ -10,6 +10,7 @@ import struct
 import threading
 import time
 import tempfile
+import traceback
 import os
 from typing import Optional, Dict, Any, List
 
@@ -129,8 +130,15 @@ class SocketServerHandler:
                     # Client disconnected
                     break
                 except Exception as e:
-                    # Send error response
-                    error_response = {"error": str(e), "type": type(e).__name__}
+                    # Send error response. str(e) is empty for exceptions
+                    # raised without arguments, which would otherwise reach
+                    # the client as a blank message, so carry the traceback
+                    # too and let the client fall back to it.
+                    error_response = {
+                        "error": str(e),
+                        "type": type(e).__name__,
+                        "traceback": traceback.format_exc(),
+                    }
                     try:
                         SocketProtocol.send_message(client_socket, error_response)
                     except:
