@@ -1113,6 +1113,39 @@ def _capstone_range(args, client, start: int, stop: int) -> Optional[Dict]:
     }
 
 
+# Backends format a disassembly line as "<addr><sep><text>", but disagree on
+# the separator ("0x4da0:\tpush rbp" for ghidra/angr, "0000...4da0  push rbp"
+# for ida). Parse both so the structured output is identical either way.
+_NATIVE_LINE_RE = re.compile(r"^\s*(?:0x)?([0-9a-fA-F]+)\s*:?\s+(.*)$")
+
+
+def _native_payload(source: str, text: str) -> Dict:
+    """Give native backend output the same shape as the capstone fallback.
+
+    Both paths must return the same JSON, or a consumer has to branch on
+    `source` to read a result — which is exactly the bug CI caught: the
+    native path had no `instructions` key at all.
+    """
+    instructions = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        match = _NATIVE_LINE_RE.match(line)
+        if not match:
+            continue
+        try:
+            addr = int(match.group(1), 16)
+        except ValueError:
+            continue
+        instructions.append({"addr": addr, "text": match.group(2).strip()})
+    return {
+        "source": source,
+        "text": text,
+        "instruction_count": len(instructions),
+        "instructions": instructions,
+    }
+
+
 def _disassemble_range(args, client) -> int:
     """Disassemble an arbitrary address range, independent of functions.
 
@@ -1152,8 +1185,7 @@ def _disassemble_range(args, client) -> int:
     except Exception:
         native = None
     if native:
-        payload = {"source": client.name, "text": native,
-                   "instruction_count": native.count("\n") + 1}
+        payload = _native_payload(client.name, native)
     else:
         payload = _capstone_range(args, client, start, stop)
 

@@ -303,11 +303,32 @@ class AngrInterface(DecompilerInterface):
                 continue
         return "\n".join(lines) if lines else None
 
+    def _symbolize_operands(self, op_str: str) -> str:
+        """Replace bare addresses with the function names angr knows.
+
+        Without this a call reads `call 0x400510`, which is exactly what
+        sends someone back to a real disassembler. angr has the names in
+        kb.functions; it just was not consulting them here.
+        """
+        kb_functions = self.main_instance.project.kb.functions
+
+        def _sub(match: "re.Match[str]") -> str:
+            try:
+                target = int(match.group(0), 16)
+            except ValueError:
+                return match.group(0)
+            func = kb_functions.get(target, None)
+            name = getattr(func, "name", None) if func is not None else None
+            return name if name else match.group(0)
+
+        return re.sub(r"0x[0-9a-fA-F]+", _sub, op_str)
+
     def disassemble_range(self, start: int, end: int, **kwargs) -> Optional[str]:
         """angr-native disassembly for [start, end).
 
         Lifts one block at the requested address rather than requiring a known
-        function, so unanalyzed spans still disassemble.
+        function, so unanalyzed spans still disassemble. Operands are
+        symbolized so output is comparable to IDA's and Ghidra's.
         """
         project = self.main_instance.project
         lo = self.art_lifter.lower_addr(start)
@@ -327,8 +348,9 @@ class AngrInterface(DecompilerInterface):
                 if insn.address >= hi:
                     break
                 lifted = self.art_lifter.lift_addr(insn.address)
+                op_str = self._symbolize_operands(insn.op_str)
                 lines.append(
-                    f"0x{lifted:x}:\t{insn.mnemonic}\t{insn.op_str}".rstrip()
+                    f"0x{lifted:x}:\t{insn.mnemonic}\t{op_str}".rstrip()
                 )
             advance = block.size or 0
             if advance <= 0:

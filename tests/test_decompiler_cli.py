@@ -331,9 +331,12 @@ class _CLIBackendTestBase(unittest.TestCase):
         if not calls:
             self.skipTest("no call sites in the sampled span")
         # At least one call operand should name something rather than being a
-        # bare hex address.
+        # bare hex address. Case-insensitive: Ghidra emits "CALL", angr and
+        # IDA emit "call", and a case-sensitive pattern would let one of them
+        # pass without actually checking anything.
+        bare = re.compile(r"call\s+(0x)?[0-9a-fA-F]+\s*$", re.IGNORECASE)
         self.assertTrue(
-            any(not re.search(r"call\s+(0x)?[0-9a-fA-F]+\s*$", c) for c in calls),
+            any(not bare.search(c.rstrip()) for c in calls),
             f"no symbolized call operand found in: {calls[:5]}",
         )
 
