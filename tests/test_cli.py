@@ -87,3 +87,30 @@ class TestInstaller(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(argv=sys.argv)
+
+
+class TestBackendStatus(unittest.TestCase):
+    """`decompiler backend status` must answer for every supported backend.
+
+    Previously only `jadx` was accepted, so an agent that suspected the IDA
+    backend was unhealthy had no way to query it.
+    """
+
+    def test_every_supported_backend_is_accepted(self):
+        from declib.cli.decompiler_cli import build_parser
+        from declib.decompilers import SUPPORTED_DECOMPILERS
+
+        parser = build_parser()
+        for name in sorted(SUPPORTED_DECOMPILERS):
+            args = parser.parse_args(["backend", "status", name])
+            assert args.name == name
+
+    def test_native_status_reports_reasons_when_unavailable(self):
+        from declib.cli.decompiler_cli import _native_backend_status
+
+        status = _native_backend_status("binja")
+        assert "available" in status
+        assert status["backend"] == "binja"
+        if not status["available"]:
+            # An unavailable backend must explain itself, not just say "no".
+            assert status["reasons"]

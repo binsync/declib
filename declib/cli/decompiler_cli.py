@@ -68,7 +68,14 @@ EXIT_RUNTIME_ERROR = 1     # unhandled/unknown failure
 EXIT_UNSUPPORTED = 2       # feature not implemented for the selected backend
 
 from declib.api import server_registry
-from declib.decompilers import SUPPORTED_DECOMPILERS
+from declib.decompilers import (
+    SUPPORTED_DECOMPILERS,
+    ANGR_DECOMPILER,
+    BINJA_DECOMPILER,
+    GHIDRA_DECOMPILER,
+    IDA_DECOMPILER,
+    JADX_DECOMPILER,
+)
 from declib import skills
 
 _l = logging.getLogger("declib.cli.decompiler")
@@ -2272,16 +2279,60 @@ def cmd_install_skill(args) -> int:
 # optional backend runtimes
 # ---------------------------------------------------------------------------
 
+def _probe_import(module: str) -> Tuple[bool, Optional[str]]:
+    """Return (importable, error_text) for a backend's Python entry point."""
+    import importlib
+
+    try:
+        importlib.import_module(module)
+        return True, None
+    except Exception as exc:  # noqa: BLE001 - a bad license raises, not just ImportError
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def _native_backend_status(name: str) -> Dict:
+    """Report whether a native (non-JADX) backend runtime is importable.
+
+    Mirrors the shape of ``JadxWorkerClient.runtime_status()``: an
+    ``available`` flag plus human-readable ``reasons`` when it is not, so
+    every backend answers ``backend status`` the same way.
+    """
+    # Ordered candidates: the first importable one wins. IDA exposes a
+    # different module per major version, so several are acceptable.
+    candidates = {
+        IDA_DECOMPILER: ["idapro", "idaapi", "ida"],
+        GHIDRA_DECOMPILER: ["pyghidra"],
+        BINJA_DECOMPILER: ["binaryninja"],
+        ANGR_DECOMPILER: ["angr"],
+    }[name]
+
+    reasons = []
+    for module in candidates:
+        ok, err = _probe_import(module)
+        if ok:
+            status = {"available": True, "backend": name, "module": module}
+            if name == GHIDRA_DECOMPILER:
+                status["ghidra_install_dir"] = os.getenv("GHIDRA_INSTALL_DIR")
+            return status
+        reasons.append(f"{module}: {err}")
+
+    status = {"available": False, "backend": name, "reasons": reasons}
+    if name == GHIDRA_DECOMPILER and not os.getenv("GHIDRA_INSTALL_DIR"):
+        status["reasons"].append("GHIDRA_INSTALL_DIR is not set")
+    return status
+
+
 def cmd_backend(args) -> int:
     if args.backend_action != "status":
         raise SystemExit(f"Unknown backend action: {args.backend_action}")
-    if args.name == "jadx":
+    if args.name == JADX_DECOMPILER:
         from declib.decompilers.jadx.worker_client import JadxWorkerClient
 
         status = JadxWorkerClient.runtime_status()
-        _emit(args, status)
-        return EXIT_OK if status["available"] else EXIT_NOT_FOUND
-    raise SystemExit(f"Backend runtime status is not implemented for {args.name!r}")
+    else:
+        status = _native_backend_status(args.name)
+    _emit(args, status)
+    return EXIT_OK if status["available"] else EXIT_NOT_FOUND
 
 
 # ---------------------------------------------------------------------------
@@ -2572,7 +2623,7 @@ def build_parser() -> argparse.ArgumentParser:
         "status",
         help="Check whether an optional backend runtime is ready.",
     )
-    p_backend_status.add_argument("name", choices=["jadx"])
+    p_backend_status.add_argument("name", choices=sorted(SUPPORTED_DECOMPILERS))
     _add_output_args(p_backend_status)
     p_backend_status.set_defaults(func=cmd_backend)
 
