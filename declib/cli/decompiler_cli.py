@@ -1123,8 +1123,13 @@ def _native_payload(source: str, text: str) -> Dict:
     """Give native backend output the same shape as the capstone fallback.
 
     Both paths must return the same JSON, or a consumer has to branch on
-    `source` to read a result — which is exactly the bug CI caught: the
-    native path had no `instructions` key at all.
+    `source` to read a result. Every entry carries ``addr``, ``text`` and
+    ``size``; ``bytes`` is capstone-only, because native disassembly text does
+    not include the raw encoding.
+
+    ``size`` is derived from the gap to the next instruction — the backends
+    print addresses, not lengths. The final instruction has no successor to
+    measure against, so it is omitted rather than guessed.
     """
     instructions = []
     for line in text.splitlines():
@@ -1138,6 +1143,12 @@ def _native_payload(source: str, text: str) -> Dict:
         except ValueError:
             continue
         instructions.append({"addr": addr, "text": match.group(2).strip()})
+
+    for current, following in zip(instructions, instructions[1:]):
+        gap = following["addr"] - current["addr"]
+        if gap > 0:
+            current["size"] = gap
+
     return {
         "source": source,
         "text": text,

@@ -350,10 +350,15 @@ class _CLIBackendTestBase(unittest.TestCase):
         self._load_fauxware()
         name = self._resolve_main_name()
         start = json.loads(_run_cli("disassemble", name, "--json").stdout)["addr"]
-        first = json.loads(
+        instructions = json.loads(
             _run_cli("disassemble", "--start", hex(start), "--count", "16", "--json").stdout
-        )["instructions"][0]
-        mid = start + first["size"]
+        )["instructions"]
+        # `size` is part of the contract for every instruction that has a
+        # successor to measure against -- both the native and capstone paths
+        # must provide it, or a consumer has to branch on `source`.
+        self.assertGreaterEqual(len(instructions), 2, "need two instructions to step")
+        self.assertIn("size", instructions[0])
+        mid = start + instructions[0]["size"]
 
         payload = json.loads(
             _run_cli("disassemble", "--start", hex(mid), "--count", "16", "--json").stdout

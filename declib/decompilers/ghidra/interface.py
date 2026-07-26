@@ -541,8 +541,33 @@ class GhidraDecompilerInterface(DecompilerInterface):
             return None
         return "\n".join(lines) if lines else None
 
+    def _symbolize_operands(self, text: str, space) -> str:
+        """Replace bare target addresses with the names Ghidra knows.
+
+        ``str(instruction)`` renders operands numerically ("CALL 0x00400510"),
+        which is exactly the output that sends someone back to a real
+        disassembler. The names are in the symbol table; this consults them.
+        """
+        symbol_table = self.currentProgram.getSymbolTable()
+
+        def _sub(match: "re.Match[str]") -> str:
+            try:
+                target = space.getAddress(int(match.group(0), 16))
+            except Exception:
+                return match.group(0)
+            try:
+                symbol = symbol_table.getPrimarySymbol(target)
+            except Exception:
+                return match.group(0)
+            if symbol is None:
+                return match.group(0)
+            name = str(symbol.getName())
+            return name or match.group(0)
+
+        return re.sub(r"0x[0-9a-fA-F]+", _sub, text)
+
     def disassemble_range(self, start: int, end: int, **kwargs) -> Optional[str]:
-        """Ghidra-native disassembly for [start, end), symbolization intact."""
+        """Ghidra-native disassembly for [start, end), operands symbolized."""
         lo = self.art_lifter.lower_addr(start)
         hi = self.art_lifter.lower_addr(end)
         lines: List[str] = []
@@ -556,7 +581,8 @@ class GhidraDecompilerInterface(DecompilerInterface):
                 addr = int(insn.getAddress().getOffset())
                 if addr >= hi:
                     break
-                lines.append(f"0x{self.art_lifter.lift_addr(addr):x}:\t{str(insn)}")
+                rendered = self._symbolize_operands(str(insn), space)
+                lines.append(f"0x{self.art_lifter.lift_addr(addr):x}:\t{rendered}")
                 insn = listing.getInstructionAfter(insn.getAddress())
         except Exception as exc:
             _l.warning("Ghidra disassemble_range failed: %s", exc)
