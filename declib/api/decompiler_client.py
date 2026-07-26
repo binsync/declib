@@ -585,6 +585,13 @@ class DecompilerClient:
             "args": [list(addrs)], "kwargs": kwargs,
         })
 
+    def apply_annotations(self, items: List[Dict]) -> Dict[str, int]:
+        """Apply many comments/renames in one round-trip."""
+        return self._send_request({
+            "type": "method_call", "method_name": "apply_annotations",
+            "args": [list(items)],
+        })
+
     def read_memory(self, addr: int, size: int) -> Optional[bytes]:
         """Read raw bytes from the loaded program."""
         return self._send_request({"type": "method_call", "method_name": "read_memory", "args": [addr, size]})

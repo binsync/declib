@@ -409,6 +409,80 @@ class DecompilerInterface:
                 dec = None
             out[addr] = dec.text if dec is not None else None
         return out
+    def apply_annotations(self, items: List[Dict]) -> Dict[str, int]:
+        """Apply many comments and/or function renames in one call.
+
+        Each item is ``{"addr": int, "comment": str?, "name": str?}``. Both
+        fields are optional; an item may carry either or both.
+
+        Like :meth:`decompile_many`, the default loops in-process — which
+        through DecompilerServer collapses N round-trips into one. Annotation
+        is naturally produced in bulk (a dict of address to label, built while
+        reading a binary), and applying it one CLI call at a time is what
+        pushes people back to writing a script against the raw backend API.
+
+        A failed item is counted, not raised, so one bad address does not
+        discard the rest of the batch.
+
+        @param items: annotation records, as above.
+        @return: {"comments": n, "names": n, "failed": n}
+        """
+        applied = {"comments": 0, "names": 0, "failed": 0, "errors": []}
+
+        def _fail(addr, what, reason):
+            # str(exc) is empty for exceptions raised without arguments, which
+            # would surface as "failed 0x...: " with no reason at all. Name the
+            # type in that case rather than reporting a blank.
+            text = str(reason)
+            if not text.strip() and isinstance(reason, BaseException):
+                text = f"{type(reason).__name__} (no message)"
+            applied["failed"] += 1
+            applied["errors"].append({
+                "addr": addr, "field": what, "error": text,
+            })
+
+        for item in items:
+            addr = item.get("addr")
+            if addr is None:
+                _fail(None, "addr", "record has no address")
+                continue
+
+            comment = item.get("comment")
+            name = item.get("name")
+            if comment is None and name is None:
+                _fail(addr, "record", "neither 'comment' nor 'name' given")
+                continue
+
+            if comment is not None:
+                try:
+                    self.comments[addr] = Comment(addr=addr, comment=comment)
+                    applied["comments"] += 1
+                except Exception as e:  # noqa: BLE001
+                    self.warning(f"apply_annotations: comment at {hex(addr)} failed: {e}")
+                    _fail(addr, "comment", e)
+
+            if name is not None:
+                try:
+                    func = self.functions[addr]
+                    if func is None:
+                        raise ValueError("no function starts at this address")
+                    func.name = name
+                    if func.header is not None:
+                        func.header.name = name
+                    self.functions[addr] = func
+                    # Read back rather than assuming: a backend can accept the
+                    # write and quietly not apply it, and a silently-miscounted
+                    # rename is worse than a reported failure.
+                    check = self.functions[addr]
+                    if check is not None and getattr(check, "name", None) != name:
+                        raise ValueError(
+                            f"backend kept the name {getattr(check, 'name', None)!r}"
+                        )
+                    applied["names"] += 1
+                except Exception as e:  # noqa: BLE001
+                    self.warning(f"apply_annotations: rename at {hex(addr)} failed: {e}")
+                    _fail(addr, "name", e)
+        return applied
 
     def xrefs_to(self, artifact: Artifact, decompile=False, only_code=False) -> List[Artifact]:
         """
