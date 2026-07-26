@@ -1710,6 +1710,122 @@ def cmd_list_strings(args) -> int:
     return 0
 
 
+def _safe_filename(name: str, addr: int) -> str:
+    """A filename that is stable, unique, and safe on every filesystem."""
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]", "_", name or "")[:80]
+    return f"{addr:08x}_{cleaned}.c" if cleaned else f"{addr:08x}.c"
+
+
+def cmd_export(args) -> int:
+    """Dump the whole binary to a directory in one command.
+
+    The CLI is otherwise interrogative: one function, one address, one xref per
+    call. That is the wrong shape for "read everything, then grep it", which is
+    how people actually orient in an unfamiliar binary — and the reason they
+    fall back to writing a headless script that dumps the lot.
+
+    Writes:
+      functions.json       every function: addr, name, size
+      strings.json         every string, with the functions that reference it
+      pseudo/<addr>_<name>.c   one decompilation per function
+      export.json          manifest: counts, failures, backend
+    """
+    out_dir = Path(args.out)
+    pseudo_dir = out_dir / "pseudo"
+    try:
+        pseudo_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise SystemExit(f"cannot create {out_dir}: {e}")
+
+    with _with_client(args) as client:
+        pattern = re.compile(args.filter) if args.filter else None
+        functions = []
+        for addr, func in sorted(client.functions.items(), key=lambda kv: kv[0]):
+            name = getattr(func, "name", None) or ""
+            if pattern and not pattern.search(name) and not pattern.search(hex(addr)):
+                continue
+            functions.append({
+                "addr": addr,
+                "addr_hex": hex(addr),
+                "name": name,
+                "size": getattr(func, "size", 0) or 0,
+            })
+
+        if args.limit and len(functions) > args.limit:
+            print(f"{len(functions)} functions matched; exporting the first "
+                  f"{args.limit} (raise with --limit 0 for all)", file=sys.stderr)
+            functions = functions[:args.limit]
+
+        (out_dir / "functions.json").write_text(
+            json.dumps(functions, indent=2) + "\n"
+        )
+
+        # Strings, with the callers that reference them. This is one round-trip
+        # per string — cheap on a small binary (~0.9s for 643 strings over a
+        # unix socket), but it scales with string count, hence the opt-out.
+        strings = []
+        for addr, text in (client.list_strings() or []):
+            entry = {"addr": addr, "addr_hex": hex(addr), "string": text}
+            if not args.no_string_xrefs:
+                try:
+                    refs = client.xrefs_to_addr(addr) or []
+                    entry["xrefs"] = sorted({
+                        getattr(r, "addr", None) for r in refs
+                        if getattr(r, "addr", None) is not None
+                    })
+                except Exception:
+                    entry["xrefs"] = []
+            strings.append(entry)
+        (out_dir / "strings.json").write_text(json.dumps(strings, indent=2) + "\n")
+
+        # Decompile in batches: one round-trip per batch instead of per
+        # function, which is the whole point of doing this in the library
+        # rather than as a shell loop over `decompile`.
+        addrs = [f["addr"] for f in functions]
+        by_addr = {f["addr"]: f for f in functions}
+        written, failed = 0, []
+        for i in range(0, len(addrs), args.batch_size):
+            chunk = addrs[i:i + args.batch_size]
+            try:
+                results = client.decompile_many(chunk) or {}
+            except Exception as e:
+                print(f"batch at {hex(chunk[0])} failed: {e}", file=sys.stderr)
+                failed.extend(chunk)
+                continue
+            for addr in chunk:
+                text = results.get(addr)
+                if not text:
+                    failed.append(addr)
+                    continue
+                path = pseudo_dir / _safe_filename(by_addr[addr]["name"], addr)
+                path.write_text(text if text.endswith("\n") else text + "\n")
+                written += 1
+            if not args.json:
+                print(f"  decompiled {min(i + len(chunk), len(addrs))}/{len(addrs)}",
+                      file=sys.stderr)
+
+        manifest = {
+            "backend": client.name,
+            "out_dir": str(out_dir),
+            "function_count": len(functions),
+            "decompiled": written,
+            "failed": sorted(failed),
+            "failed_count": len(failed),
+            "string_count": len(strings),
+        }
+        (out_dir / "export.json").write_text(json.dumps(manifest, indent=2) + "\n")
+
+        if args.json:
+            _emit(args, manifest)
+        else:
+            print(f"exported {written}/{len(functions)} functions "
+                  f"and {len(strings)} strings to {out_dir}")
+            if failed:
+                print(f"  {len(failed)} function(s) did not decompile "
+                      f"(listed in export.json)")
+    return EXIT_OK
+
+
 def cmd_get_callers(args) -> int:
     """Functions that contain a call to the target (call-sites only).
 
@@ -2594,6 +2710,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_batch.set_defaults(func=cmd_batch)
 
     # list_functions
+    p_export = sub.add_parser(
+        "export",
+        help="Dump the whole binary (functions, strings, all pseudocode) to a directory.",
+    )
+    p_export.add_argument("--out", required=True,
+                          help="Output directory; created if absent.")
+    p_export.add_argument("--filter",
+                          help="Only export functions whose name or hex address matches this regex.")
+    p_export.add_argument("--limit", type=int, default=2000,
+                          help="Cap on functions exported (default 2000; 0 for no cap).")
+    p_export.add_argument("--batch-size", type=int, default=25,
+                          help="Functions decompiled per round-trip (default 25).")
+    p_export.add_argument("--no-string-xrefs", action="store_true",
+                          help="Skip the per-string xref lookup, which dominates runtime.")
+    _add_server_filter_args(p_export)
+    _add_output_args(p_export)
+    p_export.set_defaults(func=cmd_export)
+
     p_lf = sub.add_parser("list_functions", help="List functions in the binary.")
     p_lf.add_argument("--filter", dest="filter", help="Regex to filter function names.")
     _add_server_filter_args(p_lf)
