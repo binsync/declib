@@ -1065,38 +1065,16 @@ def _detect_arch(client) -> Optional[str]:
     return _ANGR_ARCH_ALIASES.get(str(raw), None)
 
 
-def _disassemble_range(args, client) -> int:
-    """Disassemble an arbitrary address range, independent of functions.
+def _capstone_range(args, client, start: int, stop: int) -> Optional[Dict]:
+    """Fallback: disassemble raw bytes when the backend has no native range.
 
-    Built on ``read_memory`` (which every backend implements) plus capstone,
-    rather than the backends' function-scoped ``disassemble``. That keeps this
-    uniform across IDA / Ghidra / angr / Binary Ninja with no backend changes,
-    and covers the case the function-scoped command cannot: a span that is not
-    a function, or is not code the backend has analyzed at all.
+    Output is unsymbolized (``call 0x401000``, not ``call sub_401000``), so
+    this is strictly a second choice — see ``_disassemble_range``.
     """
     try:
         import capstone
     except ImportError:
-        print(
-            "Range disassembly needs capstone (`pip install capstone`).",
-            file=sys.stderr,
-        )
-        return EXIT_UNSUPPORTED
-
-    start, _ = _parse_target(args.start)
-    if start is None:
-        raise SystemExit(f"--start must be an address, got {args.start!r}")
-
-    if args.stop is not None:
-        stop, _ = _parse_target(args.stop)
-        if stop is None:
-            raise SystemExit(f"--stop must be an address, got {args.stop!r}")
-    else:
-        stop = start + args.count
-    if stop <= start:
-        raise SystemExit(
-            f"empty range: --stop 0x{stop:x} is not above --start 0x{start:x}"
-        )
+        return None
 
     arch = args.arch or _detect_arch(client) or "x86-64"
     if arch not in _CAPSTONE_ARCHS:
@@ -1107,10 +1085,7 @@ def _disassemble_range(args, client) -> int:
 
     data = client.read_memory(start, stop - start)
     if not data:
-        raise SystemExit(
-            f"backend could not read memory at 0x{start:x} "
-            f"({stop - start} bytes) — check the address is mapped"
-        )
+        return None
 
     arch_const, mode_const = _CAPSTONE_ARCHS[arch]
     md = capstone.Cs(getattr(capstone, arch_const), getattr(capstone, mode_const))
@@ -1126,16 +1101,70 @@ def _disassemble_range(args, client) -> int:
             "bytes": insn.bytes.hex(),
             "text": text,
         })
-
-    payload = {
-        "start": start,
-        "stop": stop,
+    if not insns:
+        return None
+    return {
+        "source": "capstone",
         "arch": arch,
         "bytes_read": len(data),
         "instruction_count": len(insns),
         "instructions": insns,
         "text": "\n".join(lines),
     }
+
+
+def _disassemble_range(args, client) -> int:
+    """Disassemble an arbitrary address range, independent of functions.
+
+    Prefers the backend's own ``disassemble_range``, which keeps its
+    symbolization (``call sub_401000`` rather than ``call 0x401000``) and its
+    knowledge of what is actually mapped. Falls back to reading raw bytes and
+    running capstone over them for backends that do not implement it.
+    """
+    start, _ = _parse_target(args.start)
+    if start is None:
+        raise SystemExit(f"--start must be an address, got {args.start!r}")
+
+    if args.stop is not None:
+        stop, _ = _parse_target(args.stop)
+        if stop is None:
+            raise SystemExit(f"--stop must be an address, got {args.stop!r}")
+    else:
+        stop = start + args.count
+    if stop <= start:
+        raise SystemExit(
+            f"empty range: --stop 0x{stop:x} is not above --start 0x{start:x}"
+        )
+
+    # Refuse an unmapped start where the backend can tell us. IDA answers such
+    # reads with 0xff filler rather than failing, so without this the caller
+    # gets a screen of plausible-looking garbage instead of an error.
+    try:
+        mapped = client.is_mapped(start)
+    except Exception:
+        mapped = None
+    if mapped is False:
+        raise SystemExit(f"0x{start:x} is not mapped in this program")
+
+    payload: Optional[Dict] = None
+    try:
+        native = client.disassemble_range(start, stop)
+    except Exception:
+        native = None
+    if native:
+        payload = {"source": client.name, "text": native,
+                   "instruction_count": native.count("\n") + 1}
+    else:
+        payload = _capstone_range(args, client, start, stop)
+
+    if payload is None:
+        raise SystemExit(
+            f"could not disassemble 0x{start:x}-0x{stop:x}: the backend has no "
+            "native range disassembly and reading the bytes failed "
+            "(install capstone for the raw fallback)"
+        )
+
+    payload = {"start": start, "stop": stop, **payload}
     if getattr(args, "raw", False):
         print(payload["text"])
         return EXIT_OK

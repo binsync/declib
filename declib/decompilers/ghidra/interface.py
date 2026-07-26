@@ -541,6 +541,37 @@ class GhidraDecompilerInterface(DecompilerInterface):
             return None
         return "\n".join(lines) if lines else None
 
+    def disassemble_range(self, start: int, end: int, **kwargs) -> Optional[str]:
+        """Ghidra-native disassembly for [start, end), symbolization intact."""
+        lo = self.art_lifter.lower_addr(start)
+        hi = self.art_lifter.lower_addr(end)
+        lines: List[str] = []
+        try:
+            listing = self.currentProgram.getListing()
+            space = self.currentProgram.getAddressFactory().getDefaultAddressSpace()
+            insn = listing.getInstructionAt(space.getAddress(lo))
+            if insn is None:
+                insn = listing.getInstructionAfter(space.getAddress(lo))
+            while insn is not None:
+                addr = int(insn.getAddress().getOffset())
+                if addr >= hi:
+                    break
+                lines.append(f"0x{self.art_lifter.lift_addr(addr):x}:\t{str(insn)}")
+                insn = listing.getInstructionAfter(insn.getAddress())
+        except Exception as exc:
+            _l.warning("Ghidra disassemble_range failed: %s", exc)
+            return None
+        return "\n".join(lines) if lines else None
+
+    def is_mapped(self, addr: int) -> Optional[bool]:
+        try:
+            lowered = self.art_lifter.lower_addr(addr)
+            space = self.currentProgram.getAddressFactory().getDefaultAddressSpace()
+            memory = self.currentProgram.getMemory()
+            return bool(memory.contains(space.getAddress(lowered)))
+        except Exception:
+            return None
+
     def search_bytes(self, pattern: bytes, max_results: int = 100) -> List[int]:
         import jpype
         from ghidra.util.task import TaskMonitor

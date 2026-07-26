@@ -595,6 +595,19 @@ class DecompilerClient:
             "args": [list(addrs)], "kwargs": kwargs,
         })
 
+    def disassemble_range(self, start: int, end: int, **kwargs) -> Optional[str]:
+        """Disassemble an arbitrary address span, function or not."""
+        return self._send_request({
+            "type": "method_call", "method_name": "disassemble_range",
+            "args": [start, end], "kwargs": kwargs,
+        })
+
+    def is_mapped(self, addr: int) -> Optional[bool]:
+        """Whether the backend has real bytes at ``addr``."""
+        return self._send_request({
+            "type": "method_call", "method_name": "is_mapped", "args": [addr],
+        })
+
     def read_memory(self, addr: int, size: int) -> Optional[bytes]:
         """Read raw bytes from the loaded program."""
         return self._send_request({"type": "method_call", "method_name": "read_memory", "args": [addr, size]})

@@ -303,6 +303,46 @@ class AngrInterface(DecompilerInterface):
                 continue
         return "\n".join(lines) if lines else None
 
+    def disassemble_range(self, start: int, end: int, **kwargs) -> Optional[str]:
+        """angr-native disassembly for [start, end).
+
+        Lifts one block at the requested address rather than requiring a known
+        function, so unanalyzed spans still disassemble.
+        """
+        project = self.main_instance.project
+        lo = self.art_lifter.lower_addr(start)
+        hi = self.art_lifter.lower_addr(end)
+
+        lines: List[str] = []
+        ea = lo
+        while ea < hi:
+            try:
+                block = project.factory.block(ea, size=min(hi - ea, 0x1000))
+                insns = block.capstone.insns
+            except Exception:
+                break
+            if not insns:
+                break
+            for insn in insns:
+                if insn.address >= hi:
+                    break
+                lifted = self.art_lifter.lift_addr(insn.address)
+                lines.append(
+                    f"0x{lifted:x}:\t{insn.mnemonic}\t{insn.op_str}".rstrip()
+                )
+            advance = block.size or 0
+            if advance <= 0:
+                break
+            ea += advance
+        return "\n".join(lines) if lines else None
+
+    def is_mapped(self, addr: int) -> Optional[bool]:
+        try:
+            lowered = self.art_lifter.lower_addr(addr)
+            return bool(self.main_instance.project.loader.find_object_containing(lowered))
+        except Exception:
+            return None
+
     def _decompile(self, function: Function, map_lines=False, **kwargs) -> Optional[Decompilation]:
         if function.dec_obj is None:
             function.dec_obj = self.get_decompilation_object(function, do_lower=False)

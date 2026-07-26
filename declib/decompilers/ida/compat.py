@@ -1971,6 +1971,34 @@ def disassemble_function(addr):
     return "\n".join(lines) if lines else None
 
 
+def disassemble_range(start, end):
+    """Return IDA-native disassembly for the span [start, end).
+
+    Uses the same generate_disasm_line() as disassemble_function, so operands
+    keep IDA's symbolization. next_head() walks defined items; when a span has
+    no defined head (raw data IDA never analyzed) we step a byte at a time so
+    the caller still gets output rather than an empty string.
+    """
+    lines = []
+    ea = start
+    while ea < end and ea != idaapi.BADADDR:
+        if not ida_bytes.is_loaded(ea):
+            break
+        line = idc.generate_disasm_line(ea, 0)
+        if line is not None:
+            lines.append(f"{ea:016x}  {line}")
+        nxt = idc.next_head(ea, end)
+        if nxt == idaapi.BADADDR or nxt <= ea:
+            nxt = ea + max(1, ida_bytes.get_item_size(ea))
+        ea = nxt
+    return "\n".join(lines) if lines else None
+
+
+def is_mapped(addr):
+    """Whether IDA has real bytes at ``addr`` (vs 0xff filler on a bad read)."""
+    return bool(ida_bytes.is_loaded(addr))
+
+
 @execute_write
 def wait_for_idc_initialization():
     idc.auto_wait()

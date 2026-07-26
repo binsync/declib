@@ -12,6 +12,7 @@ flow is exercised end-to-end.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -301,11 +302,40 @@ class _CLIBackendTestBase(unittest.TestCase):
         self.assertEqual(payload["start"], start)
         self.assertEqual(payload["stop"], start + 16)
         self.assertGreater(payload["instruction_count"], 0)
-        self.assertLessEqual(payload["bytes_read"], 16)
-        for insn in payload["instructions"]:
-            self.assertIn("addr", insn)
-            self.assertIn("bytes", insn)
-            self.assertIn("text", insn)
+        self.assertTrue(payload["text"].strip())
+        # The backend's own disassembly is preferred; capstone is only the
+        # fallback for backends without disassemble_range. Every backend under
+        # test implements it, so none of them should be falling back.
+        self.assertNotEqual(
+            payload["source"], "capstone",
+            "expected native backend disassembly, got the capstone fallback",
+        )
+
+    def test_disassemble_range_is_symbolized(self):
+        """Native range output must keep the backend's symbolization.
+
+        This is the whole reason range disassembly is a backend method rather
+        than capstone over read_memory: capstone renders `call 0x4970` where
+        the backend renders `call _strrchr`.
+        """
+        self._load_fauxware()
+        name = self._resolve_main_name()
+        start = json.loads(_run_cli("disassemble", name, "--json").stdout)["addr"]
+        payload = json.loads(
+            _run_cli("disassemble", "--start", hex(start), "--count", "256",
+                     "--json").stdout
+        )
+        if payload["source"] == "capstone":
+            self.skipTest("backend has no native range disassembly")
+        calls = [l for l in payload["text"].splitlines() if "call" in l.lower()]
+        if not calls:
+            self.skipTest("no call sites in the sampled span")
+        # At least one call operand should name something rather than being a
+        # bare hex address.
+        self.assertTrue(
+            any(not re.search(r"call\s+(0x)?[0-9a-fA-F]+\s*$", c) for c in calls),
+            f"no symbolized call operand found in: {calls[:5]}",
+        )
 
     def test_disassemble_range_starts_mid_function(self):
         """A range need not begin at a function head -- that is the point.
