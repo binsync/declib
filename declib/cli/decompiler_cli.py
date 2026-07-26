@@ -1014,7 +1014,141 @@ def cmd_decompile(args) -> int:
     return 0
 
 
+# Capstone (arch, mode) by the name users pass to --arch. Keys match the
+# spelling `objdump -m` accepts where practical, so the muscle memory carries
+# over.
+_CAPSTONE_ARCHS = {
+    "x86-64": ("CS_ARCH_X86", "CS_MODE_64"),
+    "x86": ("CS_ARCH_X86", "CS_MODE_32"),
+    "x86-16": ("CS_ARCH_X86", "CS_MODE_16"),
+    "arm64": ("CS_ARCH_ARM64", "CS_MODE_ARM"),
+    "arm": ("CS_ARCH_ARM", "CS_MODE_ARM"),
+    "thumb": ("CS_ARCH_ARM", "CS_MODE_THUMB"),
+    "mips": ("CS_ARCH_MIPS", "CS_MODE_MIPS32"),
+    "mips64": ("CS_ARCH_MIPS", "CS_MODE_MIPS64"),
+    "ppc": ("CS_ARCH_PPC", "CS_MODE_32"),
+    "ppc64": ("CS_ARCH_PPC", "CS_MODE_64"),
+    "riscv32": ("CS_ARCH_RISCV", "CS_MODE_RISCV32"),
+    "riscv64": ("CS_ARCH_RISCV", "CS_MODE_RISCV64"),
+    "sparc": ("CS_ARCH_SPARC", "CS_MODE_BIG_ENDIAN"),
+}
+
+# angr reports arch names via archinfo; map the common ones onto --arch keys
+# so auto-detection works on that backend. Other backends do not implement
+# `binary_arch`, which is why --arch exists and why the default is explicit.
+_ANGR_ARCH_ALIASES = {
+    "AMD64": "x86-64", "X86": "x86", "AARCH64": "arm64", "ARMEL": "arm",
+    "ARMHF": "arm", "ARMCortexM": "thumb", "MIPS32": "mips", "MIPS64": "mips64",
+    "PPC32": "ppc", "PPC64": "ppc64", "RISCV32": "riscv32", "RISCV64": "riscv64",
+}
+
+
+def _detect_arch(client) -> Optional[str]:
+    """Best-effort arch detection. Only angr implements ``binary_arch``.
+
+    A backend without it (IDA, Ghidra) raises server-side, which the client
+    logs at ERROR. That is an expected answer here, not a fault, so the probe
+    is silenced — otherwise every range disassembly on IDA prints a red line
+    that looks like a real failure.
+    """
+    client_log = logging.getLogger("declib.api.decompiler_client")
+    previous = client_log.level
+    client_log.setLevel(logging.CRITICAL)
+    try:
+        raw = client.binary_arch
+    except Exception:
+        return None
+    finally:
+        client_log.setLevel(previous)
+    if not raw:
+        return None
+    return _ANGR_ARCH_ALIASES.get(str(raw), None)
+
+
+def _disassemble_range(args, client) -> int:
+    """Disassemble an arbitrary address range, independent of functions.
+
+    Built on ``read_memory`` (which every backend implements) plus capstone,
+    rather than the backends' function-scoped ``disassemble``. That keeps this
+    uniform across IDA / Ghidra / angr / Binary Ninja with no backend changes,
+    and covers the case the function-scoped command cannot: a span that is not
+    a function, or is not code the backend has analyzed at all.
+    """
+    try:
+        import capstone
+    except ImportError:
+        print(
+            "Range disassembly needs capstone (`pip install capstone`).",
+            file=sys.stderr,
+        )
+        return EXIT_UNSUPPORTED
+
+    start, _ = _parse_target(args.start)
+    if start is None:
+        raise SystemExit(f"--start must be an address, got {args.start!r}")
+
+    if args.stop is not None:
+        stop, _ = _parse_target(args.stop)
+        if stop is None:
+            raise SystemExit(f"--stop must be an address, got {args.stop!r}")
+    else:
+        stop = start + args.count
+    if stop <= start:
+        raise SystemExit(
+            f"empty range: --stop 0x{stop:x} is not above --start 0x{start:x}"
+        )
+
+    arch = args.arch or _detect_arch(client) or "x86-64"
+    if arch not in _CAPSTONE_ARCHS:
+        raise SystemExit(
+            f"unknown --arch {arch!r}; choose from: "
+            + ", ".join(sorted(_CAPSTONE_ARCHS))
+        )
+
+    data = client.read_memory(start, stop - start)
+    if not data:
+        raise SystemExit(
+            f"backend could not read memory at 0x{start:x} "
+            f"({stop - start} bytes) — check the address is mapped"
+        )
+
+    arch_const, mode_const = _CAPSTONE_ARCHS[arch]
+    md = capstone.Cs(getattr(capstone, arch_const), getattr(capstone, mode_const))
+    md.skipdata = True  # undecodable bytes become .byte, never truncate the run
+
+    lines, insns = [], []
+    for insn in md.disasm(data, start):
+        text = f"{insn.mnemonic} {insn.op_str}".strip()
+        lines.append(f"{insn.address:#018x}  {text}")
+        insns.append({
+            "addr": insn.address,
+            "size": insn.size,
+            "bytes": insn.bytes.hex(),
+            "text": text,
+        })
+
+    payload = {
+        "start": start,
+        "stop": stop,
+        "arch": arch,
+        "bytes_read": len(data),
+        "instruction_count": len(insns),
+        "instructions": insns,
+        "text": "\n".join(lines),
+    }
+    if getattr(args, "raw", False):
+        print(payload["text"])
+        return EXIT_OK
+    _emit(args, payload, text_field="text")
+    return EXIT_OK
+
+
 def cmd_disassemble(args) -> int:
+    if getattr(args, "start", None) is not None:
+        with _with_client(args) as client:
+            return _disassemble_range(args, client)
+    if not args.target:
+        raise SystemExit("give a function (target) or an address range (--start)")
     with _with_client(args) as client:
         addr = _resolve_function_addr(client, args.target)
         known = _known_function_addrs(client)
@@ -2991,8 +3125,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_dec.set_defaults(func=cmd_decompile)
 
     # disassemble
-    p_dis = sub.add_parser("disassemble", help="Disassemble a function by name or address.")
-    p_dis.add_argument("target", help="Function name or address (hex/decimal).")
+    p_dis = sub.add_parser(
+        "disassemble",
+        help="Disassemble a function, or an arbitrary address range with --start.",
+    )
+    p_dis.add_argument("target", nargs="?",
+                       help="Function name or address (hex/decimal). Omit when using --start.")
+    p_dis.add_argument("--start",
+                       help="Disassemble an address range instead of a function. "
+                            "Works on any mapped span, analyzed or not.")
+    p_dis.add_argument("--stop",
+                       help="End of the range, exclusive. Defaults to --start plus --count.")
+    p_dis.add_argument("--count", type=int, default=64,
+                       help="Bytes to disassemble when --stop is omitted (default: 64).")
+    p_dis.add_argument("--arch", choices=sorted(_CAPSTONE_ARCHS),
+                       help="Architecture for range disassembly. Auto-detected where the "
+                            "backend reports one, else x86-64.")
     p_dis.add_argument("--raw", action="store_true",
                        help="Print the disassembly text directly (no JSON or header wrapping).")
     _add_server_filter_args(p_dis)

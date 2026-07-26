@@ -500,7 +500,17 @@ class DecompilerClient:
     def binary_hash(self) -> str:
         """Hash of the binary"""
         return self._send_request({"type": "property_get", "property_name": "binary_hash"})
-    
+
+    @property
+    def binary_arch(self) -> Optional[str]:
+        """Architecture of the loaded binary, when the backend reports one.
+
+        Only some backends implement this, so callers should treat a raised
+        exception as "unknown" rather than a failure.
+        """
+        return self._send_request({"type": "property_get", "property_name": "binary_arch"})
+
+
     @property
     def binary_path(self) -> Optional[str]:
         """Path to the binary"""
