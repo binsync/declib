@@ -578,6 +578,13 @@ class DecompilerClient:
         """Disassemble a function"""
         return self._send_request({"type": "method_call", "method_name": "disassemble", "args": [addr], "kwargs": kwargs})
 
+    def decompile_many(self, addrs: List[int], **kwargs) -> Dict[int, Optional[str]]:
+        """Decompile several functions in one round-trip."""
+        return self._send_request({
+            "type": "method_call", "method_name": "decompile_many",
+            "args": [list(addrs)], "kwargs": kwargs,
+        })
+
     def read_memory(self, addr: int, size: int) -> Optional[bytes]:
         """Read raw bytes from the loaded program."""
         return self._send_request({"type": "method_call", "method_name": "read_memory", "args": [addr, size]})

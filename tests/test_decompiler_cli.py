@@ -231,6 +231,65 @@ class _CLIBackendTestBase(unittest.TestCase):
         text = payload["text"].lower()
         self.assertTrue(any(op in text for op in ("push", "mov", "call", "sub")))
 
+    def test_export_writes_a_whole_binary_dump(self):
+        """`export` produces the corpus people otherwise script by hand."""
+        import tempfile as _tf
+
+        self._load_fauxware()
+        with _tf.TemporaryDirectory() as out:
+            result = _run_cli("export", "--out", out, "--limit", "20",
+                              "--no-string-xrefs", "--json")
+            manifest = json.loads(result.stdout)
+
+            self.assertGreater(manifest["function_count"], 0)
+            self.assertEqual(manifest["decompiled"] + manifest["failed_count"],
+                             manifest["function_count"])
+
+            root = os.path.join(out, "")
+            for name in ("functions.json", "strings.json", "export.json"):
+                self.assertTrue(os.path.exists(os.path.join(root, name)), name)
+
+            funcs = json.load(open(os.path.join(root, "functions.json")))
+            self.assertEqual(len(funcs), manifest["function_count"])
+            for f in funcs:
+                self.assertIn("addr", f)
+                self.assertIn("name", f)
+
+            pseudo = os.listdir(os.path.join(root, "pseudo"))
+            self.assertEqual(len(pseudo), manifest["decompiled"])
+            if pseudo:
+                body = open(os.path.join(root, "pseudo", pseudo[0])).read()
+                self.assertTrue(body.strip(), "pseudocode file is empty")
+
+    def test_export_filter_narrows_the_set(self):
+        import tempfile as _tf
+
+        self._load_fauxware()
+        name = self._resolve_main_name()
+        with _tf.TemporaryDirectory() as out:
+            result = _run_cli("export", "--out", out, "--filter", f"^{name}$",
+                              "--no-string-xrefs", "--json")
+            manifest = json.loads(result.stdout)
+            self.assertEqual(manifest["function_count"], 1)
+
+    def test_decompile_many_matches_one_at_a_time(self):
+        """The batch path must not change results, only round-trips."""
+        self._load_fauxware()
+        listing = json.loads(_run_cli("list_functions", "--json").stdout)
+        addrs = [f["addr"] for f in listing][:5]
+        if not addrs:
+            self.skipTest("no functions")
+
+        client = self._direct_client()
+        batched = client.decompile_many(addrs)
+        for addr in addrs:
+            single = client.decompile(addr)
+            single_text = single.text if single is not None else None
+            self.assertEqual(
+                bool(batched.get(addr)), bool(single_text),
+                f"batch and single disagree on 0x{addr:x}",
+            )
+
     def test_decompile_raw(self):
         """--raw should print text directly, not JSON-wrapped."""
         self._load_fauxware()
@@ -2014,3 +2073,34 @@ class TestNewDecLibFeatures(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestExportArgs(unittest.TestCase):
+    """export plumbing that needs no backend."""
+
+    def test_out_is_required(self):
+        from declib.cli.decompiler_cli import build_parser
+
+        with self.assertRaises(SystemExit):
+            build_parser().parse_args(["export"])
+
+    def test_defaults(self):
+        from declib.cli.decompiler_cli import build_parser
+
+        args = build_parser().parse_args(["export", "--out", "/tmp/x"])
+        self.assertEqual(args.batch_size, 25)
+        self.assertEqual(args.limit, 2000)
+        self.assertFalse(args.no_string_xrefs)
+
+    def test_safe_filename_is_filesystem_safe_and_unique(self):
+        from declib.cli.decompiler_cli import _safe_filename
+
+        # Names from real binaries carry ::, /, spaces and unicode.
+        self.assertEqual(_safe_filename("main", 0x401000), "00401000_main.c")
+        weird = _safe_filename("ns::op<T>/x y", 0x1234)
+        self.assertNotIn("/", weird)
+        self.assertTrue(weird.startswith("00001234_"))
+        # An unnamed function still gets a unique, valid filename.
+        self.assertEqual(_safe_filename("", 0x55), "00000055.c")
+        # Two same-named functions at different addresses cannot collide.
+        self.assertNotEqual(_safe_filename("f", 1), _safe_filename("f", 2))

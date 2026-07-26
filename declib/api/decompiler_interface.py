@@ -385,6 +385,31 @@ class DecompilerInterface:
 
         return decompilation
 
+    def decompile_many(self, addrs: List[int], **kwargs) -> Dict[int, Optional[str]]:
+        """Decompile several functions in one call.
+
+        The default loops :meth:`decompile` in-process. That is deliberately not
+        a no-op: when driven through DecompilerServer it collapses N socket
+        round-trips into one, which is the difference between "grep the whole
+        binary" being practical and being a script someone writes by hand.
+
+        Backends with a native bulk path may override. A function that fails to
+        decompile maps to None rather than aborting the batch — a single bad
+        function should not lose the other 499.
+
+        @param addrs: Lifted function addresses.
+        @return: {addr: decompilation text or None}
+        """
+        out: Dict[int, Optional[str]] = {}
+        for addr in addrs:
+            try:
+                dec = self.decompile(addr, **kwargs)
+            except Exception as e:  # noqa: BLE001 - one bad function must not kill the batch
+                self.warning(f"decompile_many: {hex(addr)} failed: {e}")
+                dec = None
+            out[addr] = dec.text if dec is not None else None
+        return out
+
     def xrefs_to(self, artifact: Artifact, decompile=False, only_code=False) -> List[Artifact]:
         """
         Returns a list of artifacts that reference the provided artifact.
