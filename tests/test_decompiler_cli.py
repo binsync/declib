@@ -2386,3 +2386,73 @@ class TestBatchRawMessage(unittest.TestCase):
             {"id": "x", "argv": ["decompile", "0x1000", "--raw"]}, None
         )
         self.assertIn("results[].result.text", result["error"])
+
+
+
+class TestStaleIdaDatabaseRecovery(unittest.TestCase):
+    """A crashed IDA server must not poison its project forever.
+
+    IDA unpacks its database into .id0/.id1/.id2/.nam/.til while a session is
+    live and repacks them on a clean close. Orphaned by a crash they look like
+    a still-open database, and every later load of that binary fails with
+    "Failed to open database" until something clears them.
+    """
+
+    def _project(self, tmp, *, with_saved_db=True):
+        import pathlib as _pl
+        d = _pl.Path(tmp) / "ida"
+        d.mkdir(parents=True)
+        for suffix in (".id0", ".id1", ".id2", ".nam", ".til"):
+            (d / f"target{suffix}").write_bytes(b"residue")
+        if with_saved_db:
+            (d / "target.i64").write_bytes(b"saved analysis")
+        return _pl.Path(tmp)
+
+    def test_removes_unpacked_components(self):
+        import tempfile
+        from declib.cli.decompiler_cli import _clear_stale_ida_database
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = self._project(tmp)
+            removed = _clear_stale_ida_database(proj, "ida")
+            self.assertEqual(len(removed), 5)
+            left = {p.name for p in (proj / "ida").iterdir()}
+            self.assertEqual(left, {"target.i64"})
+
+    def test_preserves_the_saved_database(self):
+        """The .i64 holds the user's actual work and must never be removed."""
+        import tempfile
+        from declib.cli.decompiler_cli import _clear_stale_ida_database
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = self._project(tmp)
+            _clear_stale_ida_database(proj, "ida")
+            self.assertTrue((proj / "ida" / "target.i64").exists())
+            self.assertEqual((proj / "ida" / "target.i64").read_bytes(),
+                             b"saved analysis")
+
+    def test_noop_for_other_backends(self):
+        import tempfile
+        from declib.cli.decompiler_cli import _clear_stale_ida_database
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = self._project(tmp)
+            self.assertEqual(_clear_stale_ida_database(proj, "ghidra"), [])
+            self.assertEqual(len(list((proj / "ida").iterdir())), 6)
+
+    def test_noop_when_nothing_stale(self):
+        import tempfile, pathlib as _pl
+        from declib.cli.decompiler_cli import _clear_stale_ida_database
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = _pl.Path(tmp)
+            (proj / "ida").mkdir()
+            (proj / "ida" / "target.i64").write_bytes(b"saved")
+            self.assertEqual(_clear_stale_ida_database(proj, "ida"), [])
+
+    def test_handles_missing_project_dir(self):
+        import pathlib as _pl
+        from declib.cli.decompiler_cli import _clear_stale_ida_database
+
+        self.assertEqual(_clear_stale_ida_database(None, "ida"), [])
+        self.assertEqual(_clear_stale_ida_database(_pl.Path("/nonexistent-xyz"), "ida"), [])

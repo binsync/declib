@@ -448,6 +448,42 @@ def _wait_for_server(
     )
 
 
+# IDA unpacks its database into these components while a session is live and
+# repacks them into the .i64/.idb on a clean close. Left behind by a crash they
+# look to IDA like a database that is still open, and every later load of that
+# binary fails with "Failed to open database" -- permanently, for that project.
+_IDA_UNPACKED_SUFFIXES = (".id0", ".id1", ".id2", ".nam", ".til")
+
+
+def _clear_stale_ida_database(project_dir: Optional[Path], backend: str) -> list[str]:
+    """Remove crash residue that would otherwise poison this project forever.
+
+    Only called when no live server is registered for this project, so anything
+    unpacked here is left over from a process that died without repacking. The
+    saved analysis lives in the .i64/.idb, which is deliberately preserved -- we
+    remove only the unpacked components, so a reload restores the saved work and
+    re-derives whatever was merely cached.
+
+    Observed on a 40-binary benchmark: 64 of 80 DecLib failures were this, with
+    the same binary failing up to 7 times in a row because nothing ever cleared
+    the residue.
+    """
+    if backend != IDA_DECOMPILER or project_dir is None:
+        return []
+    root = project_dir if project_dir.is_dir() else None
+    if root is None:
+        return []
+    removed = []
+    for candidate in sorted(root.rglob("*")):
+        if candidate.is_file() and candidate.suffix in _IDA_UNPACKED_SUFFIXES:
+            try:
+                candidate.unlink()
+                removed.append(candidate.name)
+            except OSError:
+                continue
+    return removed
+
+
 def cmd_load(args) -> int:
     binary_path = Path(args.binary).expanduser().resolve()
     if not binary_path.exists():
@@ -502,6 +538,15 @@ def cmd_load(args) -> int:
         # the server holding it. Give each forced copy its own project dir.
         if args.force and existing:
             project_dir = project_dir.with_name(f"{project_dir.name}-{server_id}")
+    # Nothing live owns this project (the `existing` check above already
+    # returned or tore those down), so any unpacked IDA database here is crash
+    # residue. Clear it or the load below fails with "Failed to open database".
+    stale = _clear_stale_ida_database(project_dir, backend)
+    if stale:
+        print(f"cleared stale IDA database residue from a previous crash "
+              f"({len(stale)} file(s)); reloading from the saved database",
+              file=sys.stderr)
+
     log_path = _server_log_path(server_id)
     process = _spawn_server(
         binary_path,
