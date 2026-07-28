@@ -272,6 +272,41 @@ class _CLIBackendTestBase(unittest.TestCase):
             manifest = json.loads(result.stdout)
             self.assertEqual(manifest["function_count"], 1)
 
+    def test_export_min_size_drops_stubs_but_keeps_real_code(self):
+        """--min-size is what makes a dump readable rather than only greppable.
+
+        Import stubs dominate the function count of any dynamically linked
+        binary and say nothing. Dropping them must not drop real code, and
+        must stay opt-in so existing callers see no change.
+        """
+        import tempfile as _tf
+
+        self._load_fauxware()
+        with _tf.TemporaryDirectory() as out:
+            everything = json.loads(_run_cli(
+                "export", "--out", out, "--no-string-xrefs", "--json").stdout)
+            self.assertEqual(everything["skipped_below_min_size"], 0,
+                             "default must export everything, unchanged")
+
+        with _tf.TemporaryDirectory() as out:
+            trimmed = json.loads(_run_cli(
+                "export", "--out", out, "--min-size", "16",
+                "--no-string-xrefs", "--json").stdout)
+
+            self.assertLessEqual(trimmed["function_count"],
+                                 everything["function_count"])
+            self.assertEqual(
+                trimmed["function_count"] + trimmed["skipped_below_min_size"],
+                everything["function_count"],
+                "every function is either exported or counted as skipped")
+
+            kept = json.load(open(os.path.join(out, "functions.json")))
+            self.assertTrue(kept, "min-size must not empty the export")
+            for f in kept:
+                self.assertGreaterEqual(f["size"], 16)
+            # main is real code by any measure and must survive the filter.
+            self.assertIn(self._resolve_main_name(), [f["name"] for f in kept])
+
     def test_decompile_many_matches_one_at_a_time(self):
         """The batch path must not change results, only round-trips."""
         self._load_fauxware()
