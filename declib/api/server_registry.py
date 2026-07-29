@@ -56,6 +56,7 @@ def register_server(info: Dict) -> Path:
     payload = dict(info)
     payload.setdefault("started_at", time.time())
     payload.setdefault("pid", os.getpid())
+    payload.setdefault("namespace", _namespace_token())
     tmp_path = path.with_suffix(".json.tmp")
     with open(tmp_path, "w") as f:
         json.dump(payload, f, indent=2, default=str)
@@ -149,6 +150,52 @@ def clear_tombstone(server_id: str) -> None:
         pass
 
 
+# A registry directory can be shared by processes that cannot see each other's
+# servers -- most easily when several containers bind-mount the same home
+# directory, which is exactly how agent harnesses tend to run. Sockets live in
+# each container's own /tmp and PIDs are per-namespace, so a sibling's record
+# looks dead by both tests, and pruning deletes a perfectly healthy server's
+# record. The owner then finds itself missing from the registry.
+#
+# Stamping each record with the namespace that created it makes "not mine"
+# distinguishable from "dead". Foreign records are ignored -- never returned,
+# never deleted -- so the owner stays the only writer of its own entries.
+def _namespace_token() -> str:
+    """Identify the PID/mount namespace this process can observe servers in."""
+    import socket as _socket
+
+    parts = [_socket.gethostname()]
+    for ns in ("pid", "mnt"):
+        try:
+            parts.append(os.readlink(f"/proc/self/ns/{ns}"))
+        except OSError:
+            parts.append("?")
+    return "|".join(parts)
+
+
+def _probe_socket(socket_path: str, timeout: float = 0.5) -> bool:
+    """Whether something is actually accepting connections on `socket_path`.
+
+    A socket file on disk proves only that a server once bound there; the file
+    outlives an unclean death. Connecting is the authoritative test, and it is
+    the one ida-pro-mcp uses (`probe_instance`) for the same reason.
+    """
+    import socket as _socket
+
+    sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    try:
+        sock.settimeout(timeout)
+        sock.connect(socket_path)
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
 def _is_record_live(record: Dict) -> bool:
     pid = record.get("pid")
     socket_path = record.get("socket_path")
@@ -160,7 +207,9 @@ def _is_record_live(record: Dict) -> bool:
                 return False
         except Exception:
             return False
-    return True
+    # Both checks above are proxies: a socket file survives an unclean death,
+    # and a PID can be reused by an unrelated process. Ask the server directly.
+    return _probe_socket(socket_path)
 
 
 def list_servers(prune_stale: bool = True, pruned: Optional[List[Dict]] = None) -> List[Dict]:
@@ -186,6 +235,12 @@ def list_servers(prune_stale: bool = True, pruned: Optional[List[Dict]] = None) 
                 record = json.load(f)
         except Exception as exc:
             _l.debug("Failed to read server registry file %s: %s", entry, exc)
+            continue
+
+        # A record from another namespace is not ours to judge or delete: its
+        # socket and pid are meaningless here. Skip it entirely.
+        record_ns = record.get("namespace")
+        if record_ns is not None and record_ns != _namespace_token():
             continue
 
         if prune_stale and not _is_record_live(record):

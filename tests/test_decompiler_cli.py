@@ -12,6 +12,7 @@ flow is exercised end-to-end.
 """
 import json
 import os
+import pathlib
 import re
 import shutil
 import subprocess
@@ -2220,6 +2221,124 @@ class TestGhidraSafeNames(unittest.TestCase):
 
         for name in ("###", "", "...", "   "):
             self.assertTrue(ghidra_safe_name(name))
+
+class TestRegistryLivenessProbe(unittest.TestCase):
+    """A socket file is not proof of life; connecting to it is.
+
+    The file outlives an unclean death and a PID can be recycled, so both of
+    the cheap checks can say "alive" about a server that is gone. ida-pro-mcp
+    settles this by probing the endpoint; so do we.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ["DECLIB_SERVER_REGISTRY"] = self._tmp.name
+
+    def tearDown(self):
+        os.environ.pop("DECLIB_SERVER_REGISTRY", None)
+        self._tmp.cleanup()
+
+    def test_orphaned_socket_file_is_not_alive(self):
+        """The exact residue an unclean death leaves behind."""
+        import tempfile as _tf
+        from declib.api import server_registry
+
+        with _tf.TemporaryDirectory() as sockdir:
+            sock = os.path.join(sockdir, "decompiler.sock")
+            open(sock, "wb").close()          # a file, nothing listening
+            self.assertFalse(server_registry._is_record_live(
+                {"id": "x", "socket_path": sock, "pid": os.getpid()}))
+
+    def test_a_listening_socket_is_alive(self):
+        import socket as _socket
+        import tempfile as _tf
+        from declib.api import server_registry
+
+        with _tf.TemporaryDirectory() as sockdir:
+            sock_path = os.path.join(sockdir, "decompiler.sock")
+            srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            try:
+                srv.bind(sock_path)
+                srv.listen(1)
+                self.assertTrue(server_registry._is_record_live(
+                    {"id": "x", "socket_path": sock_path, "pid": os.getpid()}))
+            finally:
+                srv.close()
+
+    def test_probe_reports_false_for_a_missing_path(self):
+        from declib.api import server_registry
+
+        self.assertFalse(server_registry._probe_socket("/nonexistent/nope.sock"))
+
+
+class TestRegistryNamespaceSafety(unittest.TestCase):
+    """A shared registry directory must not let one namespace delete another's.
+
+    Agent harnesses commonly bind-mount one home directory into several
+    containers at once. Sockets live in each container's own /tmp and PIDs are
+    per-namespace, so a sibling's record fails both liveness tests and gets
+    pruned -- deleting the record of a server that is alive and well. The owner
+    then cannot find its own server.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ["DECLIB_SERVER_REGISTRY"] = self._tmp.name
+
+    def tearDown(self):
+        os.environ.pop("DECLIB_SERVER_REGISTRY", None)
+        self._tmp.cleanup()
+
+    def test_foreign_records_are_never_deleted(self):
+        import json as _json
+        from declib.api import server_registry
+
+        entry = pathlib.Path(self._tmp.name) / "sibling01.json"
+        entry.write_text(_json.dumps({
+            "id": "sibling01",
+            "socket_path": "/tmp/declib_server_sibling01/decompiler.sock",
+            "binary_path": "/bin/true", "backend": "ida", "pid": 4242,
+            "namespace": "some-other-container|pid:[4026531999]|mnt:[4026532999]",
+        }))
+        self.assertEqual(server_registry.list_servers(), [],
+                         "a foreign server must not be reported as ours")
+        self.assertTrue(entry.exists(),
+                        "a foreign record must survive our pruning")
+
+    def test_own_records_still_pruned_when_dead(self):
+        from declib.api import server_registry
+
+        server_registry.register_server({
+            "id": "mine01", "socket_path": "/nonexistent/x.sock",
+            "binary_path": "/bin/true", "backend": "ida", "pid": 999999,
+        })
+        self.assertEqual(server_registry.list_servers(), [])
+        self.assertFalse((pathlib.Path(self._tmp.name) / "mine01.json").exists())
+
+    def test_new_records_carry_a_namespace(self):
+        from declib.api import server_registry
+
+        server_registry.register_server({
+            "id": "mine02", "socket_path": "/nonexistent/y.sock",
+        })
+        import json as _json
+        rec = _json.loads((pathlib.Path(self._tmp.name) / "mine02.json").read_text())
+        self.assertTrue(rec.get("namespace"))
+
+    def test_legacy_records_without_a_namespace_still_work(self):
+        """Records written before this change must not become undeletable."""
+        import json as _json
+        from declib.api import server_registry
+
+        entry = pathlib.Path(self._tmp.name) / "legacy01.json"
+        entry.write_text(_json.dumps({
+            "id": "legacy01", "socket_path": "/nonexistent/z.sock",
+            "binary_path": "/bin/true", "backend": "ida", "pid": 999999,
+        }))
+        self.assertEqual(server_registry.list_servers(), [])
+        self.assertFalse(entry.exists(), "legacy dead records are still pruned")
 
 
 class TestExportArgs(unittest.TestCase):
