@@ -2075,6 +2075,35 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TestGhidraSafeNames(unittest.TestCase):
+    """Ghidra rejects characters that filenames are perfectly free to contain.
+
+    Both the project and program names are derived from the binary's file name,
+    so a crackme called `timo#3` kills the server with
+    `IllegalArgumentException: name contains invalid character: '#'` -- and the
+    only workaround available to the analyst is renaming the file.
+    """
+
+    def test_rejected_characters_are_replaced(self):
+        from declib.decompilers.ghidra.compat.headless import ghidra_safe_name
+
+        self.assertEqual(ghidra_safe_name("timo#3"), "timo_3")
+        self.assertEqual(ghidra_safe_name("a$b&c|d"), "a_b_c_d")
+
+    def test_ordinary_names_are_untouched(self):
+        from declib.decompilers.ghidra.compat.headless import ghidra_safe_name
+
+        for name in ("crackme", "crack_me-2.bin", "some binary v1.0"):
+            self.assertEqual(ghidra_safe_name(name), name)
+
+    def test_never_returns_an_empty_name(self):
+        """Ghidra rejects an empty name too, so degenerate input needs a value."""
+        from declib.decompilers.ghidra.compat.headless import ghidra_safe_name
+
+        for name in ("###", "", "...", "   "):
+            self.assertTrue(ghidra_safe_name(name))
+
+
 class TestExportArgs(unittest.TestCase):
     """export plumbing that needs no backend."""
 

@@ -1,4 +1,5 @@
 import logging
+import re
 from pathlib import Path
 from typing import Union, Optional, Tuple
 
@@ -54,6 +55,22 @@ def open_program(
     return flat_api, project, program
 
 
+# Ghidra validates project and program names and rejects a set of characters
+# outright. Both names are derived from the binary's file name below, so a
+# binary called `timo#3` makes the import throw
+#   java.lang.IllegalArgumentException: name contains invalid character: '#'
+# which reaches the caller only as a server that died with no usable reason.
+# Filenames are not ours to choose -- CTF and crackme corpora are full of
+# them -- so sanitize the derived *names* and leave the path on disk alone.
+_GHIDRA_NAME_UNSAFE = re.compile(r"[^A-Za-z0-9._\- ]")
+
+
+def ghidra_safe_name(name: str) -> str:
+    """Return `name` with characters Ghidra rejects replaced by underscores."""
+    safe = _GHIDRA_NAME_UNSAFE.sub("_", str(name)).strip(" .")
+    return safe or "program"
+
+
 def _setup_project(
     binary_path: Optional[Union[str, Path]] = None,
     project_location: Union[str, Path] = None,
@@ -75,7 +92,9 @@ def _setup_project(
     else:
         project_location = binary_path.parent
     if not project_name:
-        project_name = f"{binary_path.name}_ghidra"
+        project_name = f"{ghidra_safe_name(binary_path.name)}_ghidra"
+    else:
+        project_name = ghidra_safe_name(project_name)
     project_location /= project_name
 
     # Ensure the project location directory exists
@@ -101,7 +120,9 @@ def _setup_project(
         # XXX: binsync patch added here:
         if binary_path is not None or program_name is not None:
             if program_name is None:
-                program_name = binary_path.name
+                program_name = ghidra_safe_name(binary_path.name)
+            else:
+                program_name = ghidra_safe_name(program_name)
             if project.getRootFolder().getFile(program_name):
                 program = project.openProgram("/", program_name, False)
     except (IOException, NotFoundException):
