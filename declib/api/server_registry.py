@@ -56,6 +56,7 @@ def register_server(info: Dict) -> Path:
     payload = dict(info)
     payload.setdefault("started_at", time.time())
     payload.setdefault("pid", os.getpid())
+    payload.setdefault("namespace", _namespace_token())
     tmp_path = path.with_suffix(".json.tmp")
     with open(tmp_path, "w") as f:
         json.dump(payload, f, indent=2, default=str)
@@ -70,6 +71,29 @@ def unregister_server(server_id: str) -> bool:
         return True
     except FileNotFoundError:
         return False
+
+
+# A registry directory can be shared by processes that cannot see each other's
+# servers -- most easily when several containers bind-mount the same home
+# directory, which is exactly how agent harnesses tend to run. Sockets live in
+# each container's own /tmp and PIDs are per-namespace, so a sibling's record
+# looks dead by both tests, and pruning deletes a perfectly healthy server's
+# record. The owner then finds itself missing from the registry.
+#
+# Stamping each record with the namespace that created it makes "not mine"
+# distinguishable from "dead". Foreign records are ignored -- never returned,
+# never deleted -- so the owner stays the only writer of its own entries.
+def _namespace_token() -> str:
+    """Identify the PID/mount namespace this process can observe servers in."""
+    import socket as _socket
+
+    parts = [_socket.gethostname()]
+    for ns in ("pid", "mnt"):
+        try:
+            parts.append(os.readlink(f"/proc/self/ns/{ns}"))
+        except OSError:
+            parts.append("?")
+    return "|".join(parts)
 
 
 def _is_record_live(record: Dict) -> bool:
@@ -100,6 +124,12 @@ def list_servers(prune_stale: bool = True) -> List[Dict]:
                 record = json.load(f)
         except Exception as exc:
             _l.debug("Failed to read server registry file %s: %s", entry, exc)
+            continue
+
+        # A record from another namespace is not ours to judge or delete: its
+        # socket and pid are meaningless here. Skip it entirely.
+        record_ns = record.get("namespace")
+        if record_ns is not None and record_ns != _namespace_token():
             continue
 
         if prune_stale and not _is_record_live(record):
