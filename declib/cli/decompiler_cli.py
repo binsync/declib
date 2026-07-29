@@ -191,9 +191,11 @@ def _select_server(
     backend: Optional[str],
 ) -> Dict:
     """Pick a server record from the registry, or error out with a helpful message."""
+    reaped: List[Dict] = []
     records = server_registry.find_servers(
         binary_path=binary_path,
         backend=backend,
+        pruned=reaped,
     )
     if server_id:
         records = [r for r in records if r.get("id") == server_id]
@@ -201,6 +203,38 @@ def _select_server(
     if not records:
         filters = {"id": server_id, "binary_path": binary_path, "backend": backend}
         active = {k: v for k, v in filters.items() if v}
+
+        # A server that died is reaped from the registry by the lookup above,
+        # so "no server matches" otherwise reads as "you never started one".
+        # If one of the corpses matches what was asked for, say so and hand
+        # back the exact command to bring it back.
+        dead = [
+            r for r in reaped
+            if (not server_id or r.get("id") == server_id)
+            and (not backend or r.get("backend") == backend)
+        ]
+        # `reaped` only holds servers *this* call pruned. Whichever command ran
+        # first after the death already pruned it -- usually `list` -- so for
+        # every later command the corpse is only in the tombstones.
+        if not dead:
+            dead = [
+                r for r in server_registry.list_tombstones()
+                if (not server_id or r.get("id") == server_id)
+                and (not backend or r.get("backend") == backend)
+                and (not binary_path or r.get("binary_path") == binary_path)
+            ]
+        if dead:
+            corpse = dead[0]
+            binary = corpse.get("binary_path") or "<unknown binary>"
+            reload_cmd = f"decompiler load {binary}"
+            if corpse.get("backend"):
+                reload_cmd += f" --backend {corpse['backend']}"
+            raise SystemExit(
+                f"Decompiler server {corpse.get('id')} is no longer running "
+                f"(binary: {binary}). It died or was stopped; its analysis is "
+                f"gone.\nReload it with:\n  {reload_cmd}"
+            )
+
         raise SystemExit(
             "No running decompiler server matches "
             f"{active or '(no filters)'}. Start one with `decompiler load <binary>`."
@@ -324,12 +358,49 @@ def _read_server_log_tail(
 
 def _server_start_error(message: str, log_path: Optional[Path]) -> SystemExit:
     lines = [message]
+    tail = _read_server_log_tail(log_path) if log_path is not None else ""
+
+    # "Failed to open database <path>" is what a backend says when another
+    # process already holds that project's database. On its own it reads like
+    # a corrupt or missing file, which sends people down the wrong path.
+    if "Failed to open database" in tail:
+        lines.append(
+            "\nThat usually means another decompiler server already holds this "
+            "project's database.\nCheck with `decompiler list`, then either "
+            "target it (`--id <id>`), replace it (`--replace`), or give this "
+            "one its own project (`--project-dir <path>`)."
+        )
+
     if log_path is not None:
         lines.append(f"Server log: {log_path}")
-        tail = _read_server_log_tail(log_path)
         if tail:
             lines.extend(("Server log tail:", tail))
     return SystemExit("\n".join(lines))
+
+
+def _backend_start_hint(backend: Optional[str]) -> str:
+    """Advice that matches the backend actually in use.
+
+    The old text named GHIDRA_INSTALL_DIR unconditionally, which is actively
+    misleading when the backend is IDA — it sends people to check an
+    environment variable that has nothing to do with their failure.
+    """
+    hints = {
+        "ghidra": "Check GHIDRA_INSTALL_DIR points at a Ghidra install.",
+        "ida": "Check the IDA install and that its licence/EULA is accepted "
+               "(`decompiler backend status ida`).",
+        "binja": "Check the Binary Ninja install and licence "
+                 "(`decompiler backend status binja`).",
+        "angr": "Check angr is importable (`decompiler backend status angr`).",
+        "jadx": "Check the JADX runtime (`decompiler backend status jadx`).",
+    }
+    generic = ("Run `decompiler backend status <backend>` to check the runtime, "
+               "and read the server log below.")
+    return hints.get(backend or "", generic)
+
+
+# How long to sit silent before telling the user what the server is doing.
+_SERVER_PROGRESS_INTERVAL = 10.0
 
 
 def _wait_for_server(
@@ -337,9 +408,19 @@ def _wait_for_server(
     process: Optional[subprocess.Popen] = None,
     log_path: Optional[Path] = None,
     timeout: float = _SERVER_START_TIMEOUT,
+    backend: Optional[str] = None,
 ) -> Dict:
-    """Block until a server with `server_id` appears in the registry or timeout."""
-    deadline = time.time() + timeout
+    """Block until a server with `server_id` appears in the registry or timeout.
+
+    Reports progress while waiting. Analyzing a large binary legitimately takes
+    minutes, but a silent wait is indistinguishable from a hang — which is how
+    a slow load gets abandoned for a hand-rolled script.
+    """
+    start = time.time()
+    deadline = start + timeout
+    next_report = start + _SERVER_PROGRESS_INTERVAL
+    last_line = ""
+
     while time.time() < deadline:
         record = server_registry.find_server(server_id=server_id)
         if record and record.get("socket_path") and os.path.exists(record["socket_path"]):
@@ -352,10 +433,27 @@ def _wait_for_server(
                     f"{exit_status} before registering.",
                     log_path,
                 )
+
+        now = time.time()
+        if now >= next_report:
+            # Surface the backend's own last log line, so "still analyzing" is
+            # visibly different from "wedged".
+            tail = _read_server_log_tail(log_path, max_bytes=2048)
+            current = tail.splitlines()[-1].strip() if tail else ""
+            elapsed = now - start
+            if current and current != last_line:
+                print(f"  [{elapsed:.0f}s] {current}", file=sys.stderr)
+                last_line = current
+            else:
+                print(f"  [{elapsed:.0f}s] still starting "
+                      f"({timeout - elapsed:.0f}s left)...", file=sys.stderr)
+            next_report = now + _SERVER_PROGRESS_INTERVAL
+
         time.sleep(_SERVER_POLL_INTERVAL)
+
     raise _server_start_error(
         f"Timed out waiting {timeout:g}s for server {server_id} to start. "
-        "Check backend dependencies (e.g. GHIDRA_INSTALL_DIR) and retry.",
+        f"{_backend_start_hint(backend)}",
         log_path,
     )
 
@@ -406,6 +504,14 @@ def cmd_load(args) -> int:
         project_dir = Path(args.project_dir).expanduser().resolve()
     else:
         project_dir = _default_project_dir(binary_path, backend)
+        # --force means "run a second copy", but the default project dir is
+        # derived from binary+backend alone, so the second server would open
+        # the same on-disk database as the first. IDA (and Ghidra) hold a lock
+        # on it, and the new server dies with a bare
+        # "Failed to open database <binary>" that names neither the lock nor
+        # the server holding it. Give each forced copy its own project dir.
+        if args.force and existing:
+            project_dir = project_dir.with_name(f"{project_dir.name}-{server_id}")
     log_path = _server_log_path(server_id)
     process = _spawn_server(
         binary_path,
@@ -419,7 +525,12 @@ def cmd_load(args) -> int:
         process=process,
         log_path=log_path,
         timeout=args.timeout,
+        backend=backend,
     )
+    # The binary is usable again; stop reporting the old death.
+    for stone in server_registry.list_tombstones():
+        if stone.get("binary_path") == str(binary_path):
+            server_registry.clear_tombstone(str(stone.get("id")))
     _emit(args, {
         "status": "started",
         "id": record["id"],
@@ -462,6 +573,7 @@ def cmd_list(args) -> int:
         return 0
     if not records:
         print(f"No running decompiler servers.  (registry: {registry_dir})")
+        _report_recent_deaths()
         return 0
     print(f"{'ID':<12} {'BACKEND':<8} {'PID':<8} BINARY")
     for r in records:
@@ -469,6 +581,20 @@ def cmd_list(args) -> int:
     print(f"\n(registry: {registry_dir})")
     return 0
 
+
+
+def _report_recent_deaths() -> None:
+    """Tell the caller a server died, rather than letting it read as never-started."""
+    stones = server_registry.list_tombstones()
+    if not stones:
+        return
+    print("\nRecently died (analysis is gone; reload to continue):")
+    for stone in stones[:5]:
+        binary = stone.get("binary_path") or "<unknown binary>"
+        cmd = f"decompiler load {binary}"
+        if stone.get("backend"):
+            cmd += f" --backend {stone['backend']}"
+        print(f"  {stone.get('id','?'):<12} {binary}\n      reload: {cmd}")
 
 def _stop_server_by_record(record: Dict, save_mode: Optional[str] = None) -> bool:
     """Shut down the server process backing `record`.
