@@ -2176,3 +2176,81 @@ class TestRegistryPruneReporting(unittest.TestCase):
                 self.assertEqual(reaped[0]["binary_path"], "/tmp/gone")
             finally:
                 os.environ.pop("DECLIB_SERVER_REGISTRY", None)
+
+class TestServerTombstones(unittest.TestCase):
+    """A death must stay explainable after the corpse is pruned.
+
+    `list` prunes, and `list` is the command agents run most, so without a
+    tombstone the useful "your server died" diagnosis is destroyed by the very
+    command used to check state -- and every later command reads as though no
+    server was ever started.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ["DECLIB_SERVER_REGISTRY"] = self._tmp.name
+
+    def tearDown(self):
+        os.environ.pop("DECLIB_SERVER_REGISTRY", None)
+        self._tmp.cleanup()
+
+    def _dead_record(self):
+        from declib.api import server_registry
+        server_registry.register_server({
+            "id": "deadbeef01", "socket_path": "/nonexistent/x.sock",
+            "binary_path": "/tmp/gone", "backend": "ida", "pid": 999999,
+        })
+
+    def test_pruning_leaves_a_tombstone(self):
+        from declib.api import server_registry
+
+        self._dead_record()
+        self.assertEqual(server_registry.list_servers(), [])
+        stones = server_registry.list_tombstones()
+        self.assertEqual([s["id"] for s in stones], ["deadbeef01"])
+        self.assertEqual(stones[0]["binary_path"], "/tmp/gone")
+        self.assertIn("died_at", stones[0])
+
+    def test_diagnosis_survives_a_second_lookup(self):
+        """The regression: the first call pruned, so the second went blind."""
+        from declib.api import server_registry
+
+        self._dead_record()
+        server_registry.list_servers()          # first call eats the corpse
+        stones = server_registry.list_tombstones()
+        self.assertTrue(stones, "second lookup must still be able to explain")
+
+    def test_tombstones_are_not_mistaken_for_live_records(self):
+        from declib.api import server_registry
+
+        self._dead_record()
+        server_registry.list_servers()
+        # The tombstone is a *.json file in the same directory; it must never
+        # come back as a server.
+        self.assertEqual(server_registry.list_servers(), [])
+        self.assertIsNone(server_registry.find_server(server_id="deadbeef01"))
+
+    def test_reload_clears_the_tombstone(self):
+        from declib.api import server_registry
+
+        self._dead_record()
+        server_registry.list_servers()
+        self.assertTrue(server_registry.list_tombstones())
+        server_registry.clear_tombstone("deadbeef01")
+        self.assertEqual(server_registry.list_tombstones(), [])
+
+    def test_tombstones_are_capped(self):
+        """A hint, not a log -- they must not grow without bound."""
+        from declib.api import server_registry
+
+        for i in range(server_registry._TOMBSTONE_KEEP + 10):
+            server_registry.register_server({
+                "id": f"corpse{i:04d}", "socket_path": "/nonexistent/x.sock",
+                "binary_path": f"/tmp/gone{i}", "backend": "ida", "pid": 999999,
+            })
+            server_registry.list_servers()
+        self.assertLessEqual(len(server_registry.list_tombstones()),
+                             server_registry._TOMBSTONE_KEEP)
+
+
