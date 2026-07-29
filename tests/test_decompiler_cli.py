@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import pathlib
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -2104,6 +2105,71 @@ class TestExportArgs(unittest.TestCase):
         self.assertEqual(_safe_filename("", 0x55), "00000055.c")
         # Two same-named functions at different addresses cannot collide.
         self.assertNotEqual(_safe_filename("f", 1), _safe_filename("f", 2))
+
+
+class TestStaleClearNeverTouchesALiveServer(unittest.TestCase):
+    """Clearing residue must not delete a running server's database.
+
+    The registry is not a reliable witness that a project is unowned -- a live
+    server can be missing from it (observed: `decompiler list` returning zero
+    while `ps` showed four healthy servers). If the clear trusts the registry,
+    a registry glitch becomes real corruption of a database still in use.
+    """
+
+    def _project_with_residue(self, tmp):
+        import pathlib as _pl
+        d = _pl.Path(tmp) / "ida"
+        d.mkdir(parents=True)
+        for suffix in (".id0", ".id1", ".id2", ".nam", ".til"):
+            (d / f"t{suffix}").write_bytes(b"in use")
+        (d / "t.i64").write_bytes(b"saved")
+        return _pl.Path(tmp)
+
+    def test_skips_when_a_process_still_owns_the_project(self):
+        import tempfile
+        from unittest import mock
+        from declib.cli import decompiler_cli as cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = self._project_with_residue(tmp)
+            with mock.patch.object(cli, "_live_server_pid_for_project",
+                                   return_value=4242):
+                self.assertEqual(cli._clear_stale_ida_database(proj, "ida"), [])
+            left = {p.name for p in (proj / "ida").iterdir()}
+            self.assertEqual(len(left), 6, "a live server's files must survive")
+
+    def test_still_clears_when_nothing_owns_it(self):
+        """The whole point of the fix must survive the new guard."""
+        import tempfile
+        from unittest import mock
+        from declib.cli import decompiler_cli as cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = self._project_with_residue(tmp)
+            with mock.patch.object(cli, "_live_server_pid_for_project",
+                                   return_value=None):
+                removed = cli._clear_stale_ida_database(proj, "ida")
+            self.assertEqual(len(removed), 5)
+            self.assertTrue((proj / "ida" / "t.i64").exists())
+
+    def test_owner_lookup_matches_on_project_dir(self):
+        import tempfile
+        from unittest import mock
+        from declib.cli import decompiler_cli as cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            class _Proc:
+                def __init__(self, pid, cmdline):
+                    self.info = {"pid": pid, "cmdline": cmdline}
+
+            mine = ["python3", "-m", "declib", "--server", "--project-dir", tmp]
+            other = ["python3", "-m", "declib", "--server", "--project-dir", "/somewhere/else"]
+            with mock.patch("psutil.process_iter", return_value=[_Proc(7, other), _Proc(9, mine)]):
+                self.assertEqual(
+                    cli._live_server_pid_for_project(pathlib.Path(tmp)), 9)
+            with mock.patch("psutil.process_iter", return_value=[_Proc(7, other)]):
+                self.assertIsNone(
+                    cli._live_server_pid_for_project(pathlib.Path(tmp)))
 
 
 class TestStaleIdaDatabaseRecovery(unittest.TestCase):
