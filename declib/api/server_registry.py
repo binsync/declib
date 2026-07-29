@@ -96,6 +96,29 @@ def _namespace_token() -> str:
     return "|".join(parts)
 
 
+def _probe_socket(socket_path: str, timeout: float = 0.5) -> bool:
+    """Whether something is actually accepting connections on `socket_path`.
+
+    A socket file on disk proves only that a server once bound there; the file
+    outlives an unclean death. Connecting is the authoritative test, and it is
+    the one ida-pro-mcp uses (`probe_instance`) for the same reason.
+    """
+    import socket as _socket
+
+    sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    try:
+        sock.settimeout(timeout)
+        sock.connect(socket_path)
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
 def _is_record_live(record: Dict) -> bool:
     pid = record.get("pid")
     socket_path = record.get("socket_path")
@@ -107,7 +130,9 @@ def _is_record_live(record: Dict) -> bool:
                 return False
         except Exception:
             return False
-    return True
+    # Both checks above are proxies: a socket file survives an unclean death,
+    # and a PID can be reused by an unrelated process. Ask the server directly.
+    return _probe_socket(socket_path)
 
 
 def list_servers(prune_stale: bool = True) -> List[Dict]:

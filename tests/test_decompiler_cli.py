@@ -2076,6 +2076,56 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TestRegistryLivenessProbe(unittest.TestCase):
+    """A socket file is not proof of life; connecting to it is.
+
+    The file outlives an unclean death and a PID can be recycled, so both of
+    the cheap checks can say "alive" about a server that is gone. ida-pro-mcp
+    settles this by probing the endpoint; so do we.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ["DECLIB_SERVER_REGISTRY"] = self._tmp.name
+
+    def tearDown(self):
+        os.environ.pop("DECLIB_SERVER_REGISTRY", None)
+        self._tmp.cleanup()
+
+    def test_orphaned_socket_file_is_not_alive(self):
+        """The exact residue an unclean death leaves behind."""
+        import tempfile as _tf
+        from declib.api import server_registry
+
+        with _tf.TemporaryDirectory() as sockdir:
+            sock = os.path.join(sockdir, "decompiler.sock")
+            open(sock, "wb").close()          # a file, nothing listening
+            self.assertFalse(server_registry._is_record_live(
+                {"id": "x", "socket_path": sock, "pid": os.getpid()}))
+
+    def test_a_listening_socket_is_alive(self):
+        import socket as _socket
+        import tempfile as _tf
+        from declib.api import server_registry
+
+        with _tf.TemporaryDirectory() as sockdir:
+            sock_path = os.path.join(sockdir, "decompiler.sock")
+            srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            try:
+                srv.bind(sock_path)
+                srv.listen(1)
+                self.assertTrue(server_registry._is_record_live(
+                    {"id": "x", "socket_path": sock_path, "pid": os.getpid()}))
+            finally:
+                srv.close()
+
+    def test_probe_reports_false_for_a_missing_path(self):
+        from declib.api import server_registry
+
+        self.assertFalse(server_registry._probe_socket("/nonexistent/nope.sock"))
+
+
 class TestRegistryNamespaceSafety(unittest.TestCase):
     """A shared registry directory must not let one namespace delete another's.
 
