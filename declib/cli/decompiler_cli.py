@@ -213,6 +213,16 @@ def _select_server(
             if (not server_id or r.get("id") == server_id)
             and (not backend or r.get("backend") == backend)
         ]
+        # `reaped` only holds servers *this* call pruned. Whichever command ran
+        # first after the death already pruned it -- usually `list` -- so for
+        # every later command the corpse is only in the tombstones.
+        if not dead:
+            dead = [
+                r for r in server_registry.list_tombstones()
+                if (not server_id or r.get("id") == server_id)
+                and (not backend or r.get("backend") == backend)
+                and (not binary_path or r.get("binary_path") == binary_path)
+            ]
         if dead:
             corpse = dead[0]
             binary = corpse.get("binary_path") or "<unknown binary>"
@@ -600,6 +610,10 @@ def cmd_load(args) -> int:
         timeout=args.timeout,
         backend=backend,
     )
+    # The binary is usable again; stop reporting the old death.
+    for stone in server_registry.list_tombstones():
+        if stone.get("binary_path") == str(binary_path):
+            server_registry.clear_tombstone(str(stone.get("id")))
     _emit(args, {
         "status": "started",
         "id": record["id"],
@@ -642,6 +656,7 @@ def cmd_list(args) -> int:
         return 0
     if not records:
         print(f"No running decompiler servers.  (registry: {registry_dir})")
+        _report_recent_deaths()
         return 0
     print(f"{'ID':<12} {'BACKEND':<8} {'PID':<8} BINARY")
     for r in records:
@@ -649,6 +664,20 @@ def cmd_list(args) -> int:
     print(f"\n(registry: {registry_dir})")
     return 0
 
+
+
+def _report_recent_deaths() -> None:
+    """Tell the caller a server died, rather than letting it read as never-started."""
+    stones = server_registry.list_tombstones()
+    if not stones:
+        return
+    print("\nRecently died (analysis is gone; reload to continue):")
+    for stone in stones[:5]:
+        binary = stone.get("binary_path") or "<unknown binary>"
+        cmd = f"decompiler load {binary}"
+        if stone.get("backend"):
+            cmd += f" --backend {stone['backend']}"
+        print(f"  {stone.get('id','?'):<12} {binary}\n      reload: {cmd}")
 
 def _stop_server_by_record(record: Dict, save_mode: Optional[str] = None) -> bool:
     """Shut down the server process backing `record`.
