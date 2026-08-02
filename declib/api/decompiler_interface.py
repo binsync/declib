@@ -612,6 +612,35 @@ class DecompilerInterface:
         """
         return None
 
+    def disassemble_range(self, start: int, end: int, **kwargs) -> Optional[str]:
+        """Returns the disassembly of an arbitrary address span as one string.
+
+        Unlike :meth:`disassemble`, ``start`` need not be a function head and the
+        span need not lie inside a function — this is for asking "what are these
+        bytes", including regions the backend has not analyzed as code.
+
+        Subclasses should override this to emit decompiler-native disassembly,
+        which keeps the backend's symbolization (``call sub_401000`` rather than
+        ``call 0x401000``). The default returns None, and callers are expected to
+        fall back to a raw-bytes disassembler.
+
+        @param start: Lifted address to start at, inclusive.
+        @param end: Lifted address to stop at, exclusive.
+        @return: The disassembly string, or None if unavailable.
+        """
+        return None
+
+    def is_mapped(self, addr: int) -> Optional[bool]:
+        """Whether ``addr`` is backed by real program bytes.
+
+        Backends differ on unmapped reads: IDA answers with 0xff filler rather
+        than failing, so a caller cannot tell "unmapped" from "genuinely 0xff"
+        by reading alone. Override to answer authoritatively.
+
+        @return: True/False when the backend knows, None when it cannot say.
+        """
+        return None
+
     def read_memory(self, addr: int, size: int) -> Optional[bytes]:
         """Read ``size`` bytes from the loaded program at ``addr``.
 

@@ -191,9 +191,11 @@ def _select_server(
     backend: Optional[str],
 ) -> Dict:
     """Pick a server record from the registry, or error out with a helpful message."""
+    reaped: List[Dict] = []
     records = server_registry.find_servers(
         binary_path=binary_path,
         backend=backend,
+        pruned=reaped,
     )
     if server_id:
         records = [r for r in records if r.get("id") == server_id]
@@ -201,6 +203,28 @@ def _select_server(
     if not records:
         filters = {"id": server_id, "binary_path": binary_path, "backend": backend}
         active = {k: v for k, v in filters.items() if v}
+
+        # A server that died is reaped from the registry by the lookup above,
+        # so "no server matches" otherwise reads as "you never started one".
+        # If one of the corpses matches what was asked for, say so and hand
+        # back the exact command to bring it back.
+        dead = [
+            r for r in reaped
+            if (not server_id or r.get("id") == server_id)
+            and (not backend or r.get("backend") == backend)
+        ]
+        if dead:
+            corpse = dead[0]
+            binary = corpse.get("binary_path") or "<unknown binary>"
+            reload_cmd = f"decompiler load {binary}"
+            if corpse.get("backend"):
+                reload_cmd += f" --backend {corpse['backend']}"
+            raise SystemExit(
+                f"Decompiler server {corpse.get('id')} is no longer running "
+                f"(binary: {binary}). It died or was stopped; its analysis is "
+                f"gone.\nReload it with:\n  {reload_cmd}"
+            )
+
         raise SystemExit(
             "No running decompiler server matches "
             f"{active or '(no filters)'}. Start one with `decompiler load <binary>`."
@@ -324,12 +348,49 @@ def _read_server_log_tail(
 
 def _server_start_error(message: str, log_path: Optional[Path]) -> SystemExit:
     lines = [message]
+    tail = _read_server_log_tail(log_path) if log_path is not None else ""
+
+    # "Failed to open database <path>" is what a backend says when another
+    # process already holds that project's database. On its own it reads like
+    # a corrupt or missing file, which sends people down the wrong path.
+    if "Failed to open database" in tail:
+        lines.append(
+            "\nThat usually means another decompiler server already holds this "
+            "project's database.\nCheck with `decompiler list`, then either "
+            "target it (`--id <id>`), replace it (`--replace`), or give this "
+            "one its own project (`--project-dir <path>`)."
+        )
+
     if log_path is not None:
         lines.append(f"Server log: {log_path}")
-        tail = _read_server_log_tail(log_path)
         if tail:
             lines.extend(("Server log tail:", tail))
     return SystemExit("\n".join(lines))
+
+
+def _backend_start_hint(backend: Optional[str]) -> str:
+    """Advice that matches the backend actually in use.
+
+    The old text named GHIDRA_INSTALL_DIR unconditionally, which is actively
+    misleading when the backend is IDA — it sends people to check an
+    environment variable that has nothing to do with their failure.
+    """
+    hints = {
+        "ghidra": "Check GHIDRA_INSTALL_DIR points at a Ghidra install.",
+        "ida": "Check the IDA install and that its licence/EULA is accepted "
+               "(`decompiler backend status ida`).",
+        "binja": "Check the Binary Ninja install and licence "
+                 "(`decompiler backend status binja`).",
+        "angr": "Check angr is importable (`decompiler backend status angr`).",
+        "jadx": "Check the JADX runtime (`decompiler backend status jadx`).",
+    }
+    generic = ("Run `decompiler backend status <backend>` to check the runtime, "
+               "and read the server log below.")
+    return hints.get(backend or "", generic)
+
+
+# How long to sit silent before telling the user what the server is doing.
+_SERVER_PROGRESS_INTERVAL = 10.0
 
 
 def _wait_for_server(
@@ -337,9 +398,19 @@ def _wait_for_server(
     process: Optional[subprocess.Popen] = None,
     log_path: Optional[Path] = None,
     timeout: float = _SERVER_START_TIMEOUT,
+    backend: Optional[str] = None,
 ) -> Dict:
-    """Block until a server with `server_id` appears in the registry or timeout."""
-    deadline = time.time() + timeout
+    """Block until a server with `server_id` appears in the registry or timeout.
+
+    Reports progress while waiting. Analyzing a large binary legitimately takes
+    minutes, but a silent wait is indistinguishable from a hang — which is how
+    a slow load gets abandoned for a hand-rolled script.
+    """
+    start = time.time()
+    deadline = start + timeout
+    next_report = start + _SERVER_PROGRESS_INTERVAL
+    last_line = ""
+
     while time.time() < deadline:
         record = server_registry.find_server(server_id=server_id)
         if record and record.get("socket_path") and os.path.exists(record["socket_path"]):
@@ -352,10 +423,27 @@ def _wait_for_server(
                     f"{exit_status} before registering.",
                     log_path,
                 )
+
+        now = time.time()
+        if now >= next_report:
+            # Surface the backend's own last log line, so "still analyzing" is
+            # visibly different from "wedged".
+            tail = _read_server_log_tail(log_path, max_bytes=2048)
+            current = tail.splitlines()[-1].strip() if tail else ""
+            elapsed = now - start
+            if current and current != last_line:
+                print(f"  [{elapsed:.0f}s] {current}", file=sys.stderr)
+                last_line = current
+            else:
+                print(f"  [{elapsed:.0f}s] still starting "
+                      f"({timeout - elapsed:.0f}s left)...", file=sys.stderr)
+            next_report = now + _SERVER_PROGRESS_INTERVAL
+
         time.sleep(_SERVER_POLL_INTERVAL)
+
     raise _server_start_error(
         f"Timed out waiting {timeout:g}s for server {server_id} to start. "
-        "Check backend dependencies (e.g. GHIDRA_INSTALL_DIR) and retry.",
+        f"{_backend_start_hint(backend)}",
         log_path,
     )
 
@@ -406,6 +494,14 @@ def cmd_load(args) -> int:
         project_dir = Path(args.project_dir).expanduser().resolve()
     else:
         project_dir = _default_project_dir(binary_path, backend)
+        # --force means "run a second copy", but the default project dir is
+        # derived from binary+backend alone, so the second server would open
+        # the same on-disk database as the first. IDA (and Ghidra) hold a lock
+        # on it, and the new server dies with a bare
+        # "Failed to open database <binary>" that names neither the lock nor
+        # the server holding it. Give each forced copy its own project dir.
+        if args.force and existing:
+            project_dir = project_dir.with_name(f"{project_dir.name}-{server_id}")
     log_path = _server_log_path(server_id)
     process = _spawn_server(
         binary_path,
@@ -419,6 +515,7 @@ def cmd_load(args) -> int:
         process=process,
         log_path=log_path,
         timeout=args.timeout,
+        backend=backend,
     )
     _emit(args, {
         "status": "started",
@@ -1024,7 +1121,213 @@ def cmd_decompile(args) -> int:
     return 0
 
 
+# Capstone (arch, mode) by the name users pass to --arch. Keys match the
+# spelling `objdump -m` accepts where practical, so the muscle memory carries
+# over.
+_CAPSTONE_ARCHS = {
+    "x86-64": ("CS_ARCH_X86", "CS_MODE_64"),
+    "x86": ("CS_ARCH_X86", "CS_MODE_32"),
+    "x86-16": ("CS_ARCH_X86", "CS_MODE_16"),
+    "arm64": ("CS_ARCH_ARM64", "CS_MODE_ARM"),
+    "arm": ("CS_ARCH_ARM", "CS_MODE_ARM"),
+    "thumb": ("CS_ARCH_ARM", "CS_MODE_THUMB"),
+    "mips": ("CS_ARCH_MIPS", "CS_MODE_MIPS32"),
+    "mips64": ("CS_ARCH_MIPS", "CS_MODE_MIPS64"),
+    "ppc": ("CS_ARCH_PPC", "CS_MODE_32"),
+    "ppc64": ("CS_ARCH_PPC", "CS_MODE_64"),
+    "riscv32": ("CS_ARCH_RISCV", "CS_MODE_RISCV32"),
+    "riscv64": ("CS_ARCH_RISCV", "CS_MODE_RISCV64"),
+    "sparc": ("CS_ARCH_SPARC", "CS_MODE_BIG_ENDIAN"),
+}
+
+# angr reports arch names via archinfo; map the common ones onto --arch keys
+# so auto-detection works on that backend. Other backends do not implement
+# `binary_arch`, which is why --arch exists and why the default is explicit.
+_ANGR_ARCH_ALIASES = {
+    "AMD64": "x86-64", "X86": "x86", "AARCH64": "arm64", "ARMEL": "arm",
+    "ARMHF": "arm", "ARMCortexM": "thumb", "MIPS32": "mips", "MIPS64": "mips64",
+    "PPC32": "ppc", "PPC64": "ppc64", "RISCV32": "riscv32", "RISCV64": "riscv64",
+}
+
+
+def _detect_arch(client) -> Optional[str]:
+    """Best-effort arch detection. Only angr implements ``binary_arch``.
+
+    A backend without it (IDA, Ghidra) raises server-side, which the client
+    logs at ERROR. That is an expected answer here, not a fault, so the probe
+    is silenced — otherwise every range disassembly on IDA prints a red line
+    that looks like a real failure.
+    """
+    client_log = logging.getLogger("declib.api.decompiler_client")
+    previous = client_log.level
+    client_log.setLevel(logging.CRITICAL)
+    try:
+        raw = client.binary_arch
+    except Exception:
+        return None
+    finally:
+        client_log.setLevel(previous)
+    if not raw:
+        return None
+    return _ANGR_ARCH_ALIASES.get(str(raw), None)
+
+
+def _capstone_range(args, client, start: int, stop: int) -> Optional[Dict]:
+    """Fallback: disassemble raw bytes when the backend has no native range.
+
+    Output is unsymbolized (``call 0x401000``, not ``call sub_401000``), so
+    this is strictly a second choice — see ``_disassemble_range``.
+    """
+    try:
+        import capstone
+    except ImportError:
+        return None
+
+    arch = args.arch or _detect_arch(client) or "x86-64"
+    if arch not in _CAPSTONE_ARCHS:
+        raise SystemExit(
+            f"unknown --arch {arch!r}; choose from: "
+            + ", ".join(sorted(_CAPSTONE_ARCHS))
+        )
+
+    data = client.read_memory(start, stop - start)
+    if not data:
+        return None
+
+    arch_const, mode_const = _CAPSTONE_ARCHS[arch]
+    md = capstone.Cs(getattr(capstone, arch_const), getattr(capstone, mode_const))
+    md.skipdata = True  # undecodable bytes become .byte, never truncate the run
+
+    lines, insns = [], []
+    for insn in md.disasm(data, start):
+        text = f"{insn.mnemonic} {insn.op_str}".strip()
+        lines.append(f"{insn.address:#018x}  {text}")
+        insns.append({
+            "addr": insn.address,
+            "size": insn.size,
+            "bytes": insn.bytes.hex(),
+            "text": text,
+        })
+    if not insns:
+        return None
+    return {
+        "source": "capstone",
+        "arch": arch,
+        "bytes_read": len(data),
+        "instruction_count": len(insns),
+        "instructions": insns,
+        "text": "\n".join(lines),
+    }
+
+
+# Backends format a disassembly line as "<addr><sep><text>", but disagree on
+# the separator ("0x4da0:\tpush rbp" for ghidra/angr, "0000...4da0  push rbp"
+# for ida). Parse both so the structured output is identical either way.
+_NATIVE_LINE_RE = re.compile(r"^\s*(?:0x)?([0-9a-fA-F]+)\s*:?\s+(.*)$")
+
+
+def _native_payload(source: str, text: str) -> Dict:
+    """Give native backend output the same shape as the capstone fallback.
+
+    Both paths must return the same JSON, or a consumer has to branch on
+    `source` to read a result. Every entry carries ``addr``, ``text`` and
+    ``size``; ``bytes`` is capstone-only, because native disassembly text does
+    not include the raw encoding.
+
+    ``size`` is derived from the gap to the next instruction — the backends
+    print addresses, not lengths. The final instruction has no successor to
+    measure against, so it is omitted rather than guessed.
+    """
+    instructions = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        match = _NATIVE_LINE_RE.match(line)
+        if not match:
+            continue
+        try:
+            addr = int(match.group(1), 16)
+        except ValueError:
+            continue
+        instructions.append({"addr": addr, "text": match.group(2).strip()})
+
+    for current, following in zip(instructions, instructions[1:]):
+        gap = following["addr"] - current["addr"]
+        if gap > 0:
+            current["size"] = gap
+
+    return {
+        "source": source,
+        "text": text,
+        "instruction_count": len(instructions),
+        "instructions": instructions,
+    }
+
+
+def _disassemble_range(args, client) -> int:
+    """Disassemble an arbitrary address range, independent of functions.
+
+    Prefers the backend's own ``disassemble_range``, which keeps its
+    symbolization (``call sub_401000`` rather than ``call 0x401000``) and its
+    knowledge of what is actually mapped. Falls back to reading raw bytes and
+    running capstone over them for backends that do not implement it.
+    """
+    start, _ = _parse_target(args.start)
+    if start is None:
+        raise SystemExit(f"--start must be an address, got {args.start!r}")
+
+    if args.stop is not None:
+        stop, _ = _parse_target(args.stop)
+        if stop is None:
+            raise SystemExit(f"--stop must be an address, got {args.stop!r}")
+    else:
+        stop = start + args.count
+    if stop <= start:
+        raise SystemExit(
+            f"empty range: --stop 0x{stop:x} is not above --start 0x{start:x}"
+        )
+
+    # Refuse an unmapped start where the backend can tell us. IDA answers such
+    # reads with 0xff filler rather than failing, so without this the caller
+    # gets a screen of plausible-looking garbage instead of an error.
+    try:
+        mapped = client.is_mapped(start)
+    except Exception:
+        mapped = None
+    if mapped is False:
+        raise SystemExit(f"0x{start:x} is not mapped in this program")
+
+    payload: Optional[Dict] = None
+    try:
+        native = client.disassemble_range(start, stop)
+    except Exception:
+        native = None
+    if native:
+        payload = _native_payload(client.name, native)
+    else:
+        payload = _capstone_range(args, client, start, stop)
+
+    if payload is None:
+        raise SystemExit(
+            f"could not disassemble 0x{start:x}-0x{stop:x}: the backend has no "
+            "native range disassembly and reading the bytes failed "
+            "(install capstone for the raw fallback)"
+        )
+
+    payload = {"start": start, "stop": stop, **payload}
+    if getattr(args, "raw", False):
+        print(payload["text"])
+        return EXIT_OK
+    _emit(args, payload, text_field="text")
+    return EXIT_OK
+
+
 def cmd_disassemble(args) -> int:
+    if getattr(args, "start", None) is not None:
+        with _with_client(args) as client:
+            return _disassemble_range(args, client)
+    if not args.target:
+        raise SystemExit("give a function (target) or an address range (--start)")
     with _with_client(args) as client:
         addr = _resolve_function_addr(client, args.target)
         known = _known_function_addrs(client)
@@ -1757,15 +2060,25 @@ def cmd_export(args) -> int:
     with _with_client(args) as client:
         pattern = re.compile(args.filter) if args.filter else None
         functions = []
+        skipped_small = 0
         for addr, func in sorted(client.functions.items(), key=lambda kv: kv[0]):
             name = getattr(func, "name", None) or ""
             if pattern and not pattern.search(name) and not pattern.search(hex(addr)):
+                continue
+            size = getattr(func, "size", 0) or 0
+            # Import stubs dominate the function count of any dynamically
+            # linked binary and carry no information -- on a sample crackme,
+            # 93 of 117 functions were PLT thunks, and they accounted for 45%
+            # of the exported pseudocode. Skipping them is what makes the
+            # output small enough to read rather than only grep.
+            if args.min_size and size < args.min_size:
+                skipped_small += 1
                 continue
             functions.append({
                 "addr": addr,
                 "addr_hex": hex(addr),
                 "name": name,
-                "size": getattr(func, "size", 0) or 0,
+                "size": size,
             })
 
         if args.limit and len(functions) > args.limit:
@@ -1829,6 +2142,7 @@ def cmd_export(args) -> int:
             "failed": sorted(failed),
             "failed_count": len(failed),
             "string_count": len(strings),
+            "skipped_below_min_size": skipped_small,
         }
         (out_dir / "export.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
@@ -2851,6 +3165,11 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Only export functions whose name or hex address matches this regex.")
     p_export.add_argument("--limit", type=int, default=2000,
                           help="Cap on functions exported (default 2000; 0 for no cap).")
+    p_export.add_argument("--min-size", type=int, default=0,
+                          help="Skip functions smaller than this many bytes. "
+                               "Import stubs/PLT thunks are usually the bulk of "
+                               "a function list and carry no information; "
+                               "--min-size 16 drops them. Default 0 (export all).")
     p_export.add_argument("--batch-size", type=int, default=25,
                           help="Functions decompiled per round-trip (default 25).")
     p_export.add_argument("--no-string-xrefs", action="store_true",
@@ -3080,8 +3399,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_dec.set_defaults(func=cmd_decompile)
 
     # disassemble
-    p_dis = sub.add_parser("disassemble", help="Disassemble a function by name or address.")
-    p_dis.add_argument("target", help="Function name or address (hex/decimal).")
+    p_dis = sub.add_parser(
+        "disassemble",
+        help="Disassemble a function, or an arbitrary address range with --start.",
+    )
+    p_dis.add_argument("target", nargs="?",
+                       help="Function name or address (hex/decimal). Omit when using --start.")
+    p_dis.add_argument("--start",
+                       help="Disassemble an address range instead of a function. "
+                            "Works on any mapped span, analyzed or not.")
+    p_dis.add_argument("--stop",
+                       help="End of the range, exclusive. Defaults to --start plus --count.")
+    p_dis.add_argument("--count", type=int, default=64,
+                       help="Bytes to disassemble when --stop is omitted (default: 64).")
+    p_dis.add_argument("--arch", choices=sorted(_CAPSTONE_ARCHS),
+                       help="Architecture for range disassembly. Auto-detected where the "
+                            "backend reports one, else x86-64.")
     p_dis.add_argument("--raw", action="store_true",
                        help="Print the disassembly text directly (no JSON or header wrapping).")
     _add_server_filter_args(p_dis)

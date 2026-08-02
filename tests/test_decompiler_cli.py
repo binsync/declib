@@ -12,6 +12,7 @@ flow is exercised end-to-end.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -272,6 +273,41 @@ class _CLIBackendTestBase(unittest.TestCase):
             manifest = json.loads(result.stdout)
             self.assertEqual(manifest["function_count"], 1)
 
+    def test_export_min_size_drops_stubs_but_keeps_real_code(self):
+        """--min-size is what makes a dump readable rather than only greppable.
+
+        Import stubs dominate the function count of any dynamically linked
+        binary and say nothing. Dropping them must not drop real code, and
+        must stay opt-in so existing callers see no change.
+        """
+        import tempfile as _tf
+
+        self._load_fauxware()
+        with _tf.TemporaryDirectory() as out:
+            everything = json.loads(_run_cli(
+                "export", "--out", out, "--no-string-xrefs", "--json").stdout)
+            self.assertEqual(everything["skipped_below_min_size"], 0,
+                             "default must export everything, unchanged")
+
+        with _tf.TemporaryDirectory() as out:
+            trimmed = json.loads(_run_cli(
+                "export", "--out", out, "--min-size", "16",
+                "--no-string-xrefs", "--json").stdout)
+
+            self.assertLessEqual(trimmed["function_count"],
+                                 everything["function_count"])
+            self.assertEqual(
+                trimmed["function_count"] + trimmed["skipped_below_min_size"],
+                everything["function_count"],
+                "every function is either exported or counted as skipped")
+
+            kept = json.load(open(os.path.join(out, "functions.json")))
+            self.assertTrue(kept, "min-size must not empty the export")
+            for f in kept:
+                self.assertGreaterEqual(f["size"], 16)
+            # main is real code by any measure and must survive the filter.
+            self.assertIn(self._resolve_main_name(), [f["name"] for f in kept])
+
     def test_decompile_many_matches_one_at_a_time(self):
         """The batch path must not change results, only round-trips."""
         self._load_fauxware()
@@ -289,6 +325,87 @@ class _CLIBackendTestBase(unittest.TestCase):
                 bool(batched.get(addr)), bool(single_text),
                 f"batch and single disagree on 0x{addr:x}",
             )
+    def test_disassemble_address_range(self):
+        """--start/--stop disassembles a span, not a function."""
+        self._load_fauxware()
+        name = self._resolve_main_name()
+        func = json.loads(_run_cli("disassemble", name, "--json").stdout)
+        start = func["addr"]
+
+        result = _run_cli("disassemble", "--start", hex(start), "--count", "16", "--json")
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["start"], start)
+        self.assertEqual(payload["stop"], start + 16)
+        self.assertGreater(payload["instruction_count"], 0)
+        self.assertTrue(payload["text"].strip())
+        # The backend's own disassembly is preferred; capstone is only the
+        # fallback for backends without disassemble_range. Every backend under
+        # test implements it, so none of them should be falling back.
+        self.assertNotEqual(
+            payload["source"], "capstone",
+            "expected native backend disassembly, got the capstone fallback",
+        )
+
+    def test_disassemble_range_is_symbolized(self):
+        """Native range output must keep the backend's symbolization.
+
+        This is the whole reason range disassembly is a backend method rather
+        than capstone over read_memory: capstone renders `call 0x4970` where
+        the backend renders `call _strrchr`.
+        """
+        self._load_fauxware()
+        name = self._resolve_main_name()
+        start = json.loads(_run_cli("disassemble", name, "--json").stdout)["addr"]
+        payload = json.loads(
+            _run_cli("disassemble", "--start", hex(start), "--count", "256",
+                     "--json").stdout
+        )
+        if payload["source"] == "capstone":
+            self.skipTest("backend has no native range disassembly")
+        calls = [l for l in payload["text"].splitlines() if "call" in l.lower()]
+        if not calls:
+            self.skipTest("no call sites in the sampled span")
+        # At least one call operand should name something rather than being a
+        # bare hex address. Case-insensitive: Ghidra emits "CALL", angr and
+        # IDA emit "call", and a case-sensitive pattern would let one of them
+        # pass without actually checking anything.
+        bare = re.compile(r"call\s+(0x)?[0-9a-fA-F]+\s*$", re.IGNORECASE)
+        self.assertTrue(
+            any(not bare.search(c.rstrip()) for c in calls),
+            f"no symbolized call operand found in: {calls[:5]}",
+        )
+
+    def test_disassemble_range_starts_mid_function(self):
+        """A range need not begin at a function head -- that is the point.
+
+        The function-scoped form rejects a non-head address; the range form
+        must accept it, which is what makes it a replacement for
+        `objdump --start-address`.
+        """
+        self._load_fauxware()
+        name = self._resolve_main_name()
+        start = json.loads(_run_cli("disassemble", name, "--json").stdout)["addr"]
+        instructions = json.loads(
+            _run_cli("disassemble", "--start", hex(start), "--count", "16", "--json").stdout
+        )["instructions"]
+        # `size` is part of the contract for every instruction that has a
+        # successor to measure against -- both the native and capstone paths
+        # must provide it, or a consumer has to branch on `source`.
+        self.assertGreaterEqual(len(instructions), 2, "need two instructions to step")
+        self.assertIn("size", instructions[0])
+        mid = start + instructions[0]["size"]
+
+        payload = json.loads(
+            _run_cli("disassemble", "--start", hex(mid), "--count", "16", "--json").stdout
+        )
+        self.assertEqual(payload["instructions"][0]["addr"], mid)
+
+    def test_disassemble_range_rejects_empty_span(self):
+        self._load_fauxware()
+        result = _run_cli("disassemble", "--start", "0x1000", "--stop", "0x1000",
+                          check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("empty range", (result.stderr + result.stdout))
 
     def test_decompile_raw(self):
         """--raw should print text directly, not JSON-wrapped."""
@@ -2075,6 +2192,35 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TestGhidraSafeNames(unittest.TestCase):
+    """Ghidra rejects characters that filenames are perfectly free to contain.
+
+    Both the project and program names are derived from the binary's file name,
+    so a crackme called `timo#3` kills the server with
+    `IllegalArgumentException: name contains invalid character: '#'` -- and the
+    only workaround available to the analyst is renaming the file.
+    """
+
+    def test_rejected_characters_are_replaced(self):
+        from declib.decompilers.ghidra.compat.headless import ghidra_safe_name
+
+        self.assertEqual(ghidra_safe_name("timo#3"), "timo_3")
+        self.assertEqual(ghidra_safe_name("a$b&c|d"), "a_b_c_d")
+
+    def test_ordinary_names_are_untouched(self):
+        from declib.decompilers.ghidra.compat.headless import ghidra_safe_name
+
+        for name in ("crackme", "crack_me-2.bin", "some binary v1.0"):
+            self.assertEqual(ghidra_safe_name(name), name)
+
+    def test_never_returns_an_empty_name(self):
+        """Ghidra rejects an empty name too, so degenerate input needs a value."""
+        from declib.decompilers.ghidra.compat.headless import ghidra_safe_name
+
+        for name in ("###", "", "...", "   "):
+            self.assertTrue(ghidra_safe_name(name))
+
+
 class TestExportArgs(unittest.TestCase):
     """export plumbing that needs no backend."""
 
@@ -2174,3 +2320,131 @@ class TestBatchRawMessage(unittest.TestCase):
             {"id": "x", "argv": ["decompile", "0x1000", "--raw"]}, None
         )
         self.assertIn("results[].result.text", result["error"])
+class TestServerStartupDiagnostics(unittest.TestCase):
+    """Startup/teardown diagnostics. No backend required."""
+
+    def test_backend_hint_matches_the_backend(self):
+        """The old text named GHIDRA_INSTALL_DIR whatever the backend was."""
+        from declib.cli.decompiler_cli import _backend_start_hint
+
+        self.assertIn("GHIDRA_INSTALL_DIR", _backend_start_hint("ghidra"))
+        for other in ("ida", "binja", "angr", "jadx"):
+            with self.subTest(backend=other):
+                hint = _backend_start_hint(other)
+                self.assertNotIn("GHIDRA_INSTALL_DIR", hint)
+                self.assertIn(other, hint)
+        # Unknown/absent backend still gets something actionable.
+        self.assertIn("backend status", _backend_start_hint(None))
+
+    def test_database_lock_gets_an_explanation(self):
+        """A bare "Failed to open database" reads like corruption."""
+        import tempfile as _tf
+        from declib.cli.decompiler_cli import _server_start_error
+
+        with _tf.NamedTemporaryFile("w", suffix=".log", delete=False) as fh:
+            fh.write("ERROR - Failed to start server: Failed to open database /tmp/x\n")
+            log = Path(fh.name)
+        try:
+            text = str(_server_start_error("server died", log))
+            self.assertIn("already holds this project's database", text)
+            self.assertIn("--replace", text)
+            self.assertIn("--project-dir", text)
+        finally:
+            log.unlink()
+
+    def test_unrelated_failure_gets_no_lock_advice(self):
+        import tempfile as _tf
+        from declib.cli.decompiler_cli import _server_start_error
+
+        with _tf.NamedTemporaryFile("w", suffix=".log", delete=False) as fh:
+            fh.write("ERROR - Failed to start server: no such file\n")
+            log = Path(fh.name)
+        try:
+            self.assertNotIn("already holds", str(_server_start_error("died", log)))
+        finally:
+            log.unlink()
+
+
+class TestRegistryPruneReporting(unittest.TestCase):
+    """list_servers must be able to say what it reaped."""
+
+    def test_pruned_records_are_reported(self):
+        import tempfile as _tf
+        from declib.api import server_registry as reg
+
+        with _tf.TemporaryDirectory() as tmp:
+            os.environ["DECLIB_SERVER_REGISTRY"] = tmp
+            try:
+                dead = {
+                    "id": "deadbeef01",
+                    "pid": 999999,          # not a live process
+                    "binary_path": "/tmp/gone",
+                    "backend": "ida",
+                    "socket_path": os.path.join(tmp, "nope.sock"),
+                }
+                Path(tmp, "deadbeef01.json").write_text(json.dumps(dead))
+
+                reaped = []
+                live = reg.list_servers(pruned=reaped)
+                self.assertEqual(live, [])
+                self.assertEqual([r["id"] for r in reaped], ["deadbeef01"])
+                # The caller can now name the binary in its error message.
+                self.assertEqual(reaped[0]["binary_path"], "/tmp/gone")
+            finally:
+                os.environ.pop("DECLIB_SERVER_REGISTRY", None)
+class TestDisassembleRangeArgs(unittest.TestCase):
+    """Range-disassembly plumbing that needs no backend or fixture binary."""
+
+    def test_target_is_optional_when_start_given(self):
+        from declib.cli.decompiler_cli import build_parser
+
+        args = build_parser().parse_args(
+            ["disassemble", "--start", "0x1000", "--stop", "0x1040"]
+        )
+        self.assertIsNone(args.target)
+        self.assertEqual(args.start, "0x1000")
+
+    def test_function_form_still_parses(self):
+        from declib.cli.decompiler_cli import build_parser
+
+        args = build_parser().parse_args(["disassemble", "main"])
+        self.assertEqual(args.target, "main")
+        self.assertIsNone(args.start)
+
+    def test_every_arch_choice_maps_to_real_capstone_constants(self):
+        """--arch choices must not advertise a mode capstone lacks."""
+        capstone = __import__("capstone")
+        from declib.cli.decompiler_cli import _CAPSTONE_ARCHS
+
+        for name, (arch_const, mode_const) in _CAPSTONE_ARCHS.items():
+            with self.subTest(arch=name):
+                self.assertTrue(hasattr(capstone, arch_const), f"{name}: {arch_const}")
+                self.assertTrue(hasattr(capstone, mode_const), f"{name}: {mode_const}")
+
+    def test_arch_detection_is_silent_when_backend_lacks_binary_arch(self):
+        """IDA/Ghidra raise on binary_arch; that is an answer, not an error.
+
+        Without silencing, every range disassembly on those backends prints a
+        red ERROR line from the client that reads like a real failure.
+        """
+        import logging
+        from declib.cli.decompiler_cli import _detect_arch
+
+        class _NoArchClient:
+            @property
+            def binary_arch(self):
+                logging.getLogger("declib.api.decompiler_client").error(
+                    "Request failed:  for property_get binary_arch"
+                )
+                raise RuntimeError("not implemented for this backend")
+
+        with self.assertNoLogs("declib.api.decompiler_client", level=logging.ERROR):
+            self.assertIsNone(_detect_arch(_NoArchClient()))
+
+    def test_arch_detection_maps_angr_names(self):
+        from declib.cli.decompiler_cli import _detect_arch
+
+        class _AngrClient:
+            binary_arch = "AMD64"
+
+        self.assertEqual(_detect_arch(_AngrClient()), "x86-64")

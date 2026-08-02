@@ -500,7 +500,17 @@ class DecompilerClient:
     def binary_hash(self) -> str:
         """Hash of the binary"""
         return self._send_request({"type": "property_get", "property_name": "binary_hash"})
-    
+
+    @property
+    def binary_arch(self) -> Optional[str]:
+        """Architecture of the loaded binary, when the backend reports one.
+
+        Only some backends implement this, so callers should treat a raised
+        exception as "unknown" rather than a failure.
+        """
+        return self._send_request({"type": "property_get", "property_name": "binary_arch"})
+
+
     @property
     def binary_path(self) -> Optional[str]:
         """Path to the binary"""
@@ -590,6 +600,19 @@ class DecompilerClient:
         return self._send_request({
             "type": "method_call", "method_name": "apply_annotations",
             "args": [list(items)],
+        })
+
+    def disassemble_range(self, start: int, end: int, **kwargs) -> Optional[str]:
+        """Disassemble an arbitrary address span, function or not."""
+        return self._send_request({
+            "type": "method_call", "method_name": "disassemble_range",
+            "args": [start, end], "kwargs": kwargs,
+        })
+
+    def is_mapped(self, addr: int) -> Optional[bool]:
+        """Whether the backend has real bytes at ``addr``."""
+        return self._send_request({
+            "type": "method_call", "method_name": "is_mapped", "args": [addr],
         })
 
     def read_memory(self, addr: int, size: int) -> Optional[bytes]:
