@@ -1,5 +1,6 @@
 import threading
 import functools
+import re
 from collections import defaultdict
 from typing import Dict, Optional, Any, List
 import hashlib
@@ -345,6 +346,78 @@ class BinjaInterface(DecompilerInterface):
         Binary Ninja has no internal object that needs to be refreshed.
         """
         return None
+
+    def disassemble(self, addr: int, **kwargs) -> Optional[str]:
+        """Binary Ninja disassembly for the function containing ``addr``."""
+        lowered = self.art_lifter.lower_addr(addr)
+        funcs = self.bv.get_functions_containing(lowered) or []
+        if not funcs:
+            return None
+        func = funcs[0]
+        return self.disassemble_range(
+            self.art_lifter.lift_addr(func.start),
+            self.art_lifter.lift_addr(func.highest_address + 1),
+        )
+
+    def _symbolize_operands(self, text: str) -> str:
+        """Replace bare target addresses with the names Binary Ninja knows.
+
+        ``get_disassembly`` renders operands numerically ("call 0x404cc0")
+        even though the view can resolve them; consult the symbol table (and
+        fall back to the function table) so output matches what the other
+        backends produce.
+        """
+        def _sub(match: "re.Match[str]") -> str:
+            try:
+                target = int(match.group(0), 16)
+            except ValueError:
+                return match.group(0)
+            try:
+                symbol = self.bv.get_symbol_at(target)
+                if symbol is not None and symbol.name:
+                    return str(symbol.name)
+                func = self.bv.get_function_at(target)
+                if func is not None and func.name:
+                    return str(func.name)
+            except Exception:
+                pass
+            return match.group(0)
+
+        return re.sub(r"0x[0-9a-fA-F]+", _sub, text)
+
+    def disassemble_range(self, start: int, end: int, **kwargs) -> Optional[str]:
+        """Binary Ninja disassembly for [start, end), operands symbolized.
+
+        Walks linearly from ``start`` rather than requiring a known function,
+        so spans Binary Ninja has not analysed as code still disassemble.
+        """
+        lo = self.art_lifter.lower_addr(start)
+        hi = self.art_lifter.lower_addr(end)
+        arch = self.bv.arch
+        if arch is None:
+            return None
+
+        lines: List[str] = []
+        ea = lo
+        while ea < hi:
+            try:
+                text = self.bv.get_disassembly(ea, arch)
+                length = self.bv.get_instruction_length(ea, arch)
+            except Exception:
+                break
+            if not text or not length:
+                break
+            rendered = self._symbolize_operands(text)
+            lines.append(f"0x{self.art_lifter.lift_addr(ea):x}:\t{rendered}")
+            ea += length
+        return "\n".join(lines) if lines else None
+
+    def is_mapped(self, addr: int) -> Optional[bool]:
+        try:
+            lowered = self.art_lifter.lower_addr(addr)
+            return bool(self.bv.get_segment_at(lowered))
+        except Exception:
+            return None
 
     def read_memory(self, addr: int, size: int) -> Optional[bytes]:
         if size <= 0:
