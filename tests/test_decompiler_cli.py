@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import pathlib
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -2368,6 +2369,138 @@ class TestExportArgs(unittest.TestCase):
         self.assertEqual(_safe_filename("", 0x55), "00000055.c")
         # Two same-named functions at different addresses cannot collide.
         self.assertNotEqual(_safe_filename("f", 1), _safe_filename("f", 2))
+class TestStaleClearNeverTouchesALiveServer(unittest.TestCase):
+    """Clearing residue must not delete a running server's database.
+
+    The registry is not a reliable witness that a project is unowned -- a live
+    server can be missing from it (observed: `decompiler list` returning zero
+    while `ps` showed four healthy servers). If the clear trusts the registry,
+    a registry glitch becomes real corruption of a database still in use.
+    """
+
+    def _project_with_residue(self, tmp):
+        import pathlib as _pl
+        d = _pl.Path(tmp) / "ida"
+        d.mkdir(parents=True)
+        for suffix in (".id0", ".id1", ".id2", ".nam", ".til"):
+            (d / f"t{suffix}").write_bytes(b"in use")
+        (d / "t.i64").write_bytes(b"saved")
+        return _pl.Path(tmp)
+
+    def test_skips_when_a_process_still_owns_the_project(self):
+        import tempfile
+        from unittest import mock
+        from declib.cli import decompiler_cli as cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = self._project_with_residue(tmp)
+            with mock.patch.object(cli, "_live_server_pid_for_project",
+                                   return_value=4242):
+                self.assertEqual(cli._clear_stale_ida_database(proj, "ida"), [])
+            left = {p.name for p in (proj / "ida").iterdir()}
+            self.assertEqual(len(left), 6, "a live server's files must survive")
+
+    def test_still_clears_when_nothing_owns_it(self):
+        """The whole point of the fix must survive the new guard."""
+        import tempfile
+        from unittest import mock
+        from declib.cli import decompiler_cli as cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = self._project_with_residue(tmp)
+            with mock.patch.object(cli, "_live_server_pid_for_project",
+                                   return_value=None):
+                removed = cli._clear_stale_ida_database(proj, "ida")
+            self.assertEqual(len(removed), 5)
+            self.assertTrue((proj / "ida" / "t.i64").exists())
+
+    def test_owner_lookup_matches_on_project_dir(self):
+        import tempfile
+        from unittest import mock
+        from declib.cli import decompiler_cli as cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            class _Proc:
+                def __init__(self, pid, cmdline):
+                    self.info = {"pid": pid, "cmdline": cmdline}
+
+            mine = ["python3", "-m", "declib", "--server", "--project-dir", tmp]
+            other = ["python3", "-m", "declib", "--server", "--project-dir", "/somewhere/else"]
+            with mock.patch("psutil.process_iter", return_value=[_Proc(7, other), _Proc(9, mine)]):
+                self.assertEqual(
+                    cli._live_server_pid_for_project(pathlib.Path(tmp)), 9)
+            with mock.patch("psutil.process_iter", return_value=[_Proc(7, other)]):
+                self.assertIsNone(
+                    cli._live_server_pid_for_project(pathlib.Path(tmp)))
+
+
+class TestStaleIdaDatabaseRecovery(unittest.TestCase):
+    """A crashed IDA server must not poison its project forever.
+
+    IDA unpacks its database into .id0/.id1/.id2/.nam/.til while a session is
+    live and repacks them on a clean close. Orphaned by a crash they look like
+    a still-open database, and every later load of that binary fails with
+    "Failed to open database" until something clears them.
+    """
+
+    def _project(self, tmp, *, with_saved_db=True):
+        import pathlib as _pl
+        d = _pl.Path(tmp) / "ida"
+        d.mkdir(parents=True)
+        for suffix in (".id0", ".id1", ".id2", ".nam", ".til"):
+            (d / f"target{suffix}").write_bytes(b"residue")
+        if with_saved_db:
+            (d / "target.i64").write_bytes(b"saved analysis")
+        return _pl.Path(tmp)
+
+    def test_removes_unpacked_components(self):
+        import tempfile
+        from declib.cli.decompiler_cli import _clear_stale_ida_database
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = self._project(tmp)
+            removed = _clear_stale_ida_database(proj, "ida")
+            self.assertEqual(len(removed), 5)
+            left = {p.name for p in (proj / "ida").iterdir()}
+            self.assertEqual(left, {"target.i64"})
+
+    def test_preserves_the_saved_database(self):
+        """The .i64 holds the user's actual work and must never be removed."""
+        import tempfile
+        from declib.cli.decompiler_cli import _clear_stale_ida_database
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = self._project(tmp)
+            _clear_stale_ida_database(proj, "ida")
+            self.assertTrue((proj / "ida" / "target.i64").exists())
+            self.assertEqual((proj / "ida" / "target.i64").read_bytes(),
+                             b"saved analysis")
+
+    def test_noop_for_other_backends(self):
+        import tempfile
+        from declib.cli.decompiler_cli import _clear_stale_ida_database
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = self._project(tmp)
+            self.assertEqual(_clear_stale_ida_database(proj, "ghidra"), [])
+            self.assertEqual(len(list((proj / "ida").iterdir())), 6)
+
+    def test_noop_when_nothing_stale(self):
+        import tempfile, pathlib as _pl
+        from declib.cli.decompiler_cli import _clear_stale_ida_database
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = _pl.Path(tmp)
+            (proj / "ida").mkdir()
+            (proj / "ida" / "target.i64").write_bytes(b"saved")
+            self.assertEqual(_clear_stale_ida_database(proj, "ida"), [])
+
+    def test_handles_missing_project_dir(self):
+        import pathlib as _pl
+        from declib.cli.decompiler_cli import _clear_stale_ida_database
+
+        self.assertEqual(_clear_stale_ida_database(None, "ida"), [])
+        self.assertEqual(_clear_stale_ida_database(_pl.Path("/nonexistent-xyz"), "ida"), [])
 class TestAnnotateBatch(unittest.TestCase):
     """Bulk annotation plumbing that needs no backend."""
 
@@ -2510,6 +2643,83 @@ class TestRegistryPruneReporting(unittest.TestCase):
                 self.assertEqual(reaped[0]["binary_path"], "/tmp/gone")
             finally:
                 os.environ.pop("DECLIB_SERVER_REGISTRY", None)
+class TestServerTombstones(unittest.TestCase):
+    """A death must stay explainable after the corpse is pruned.
+
+    `list` prunes, and `list` is the command agents run most, so without a
+    tombstone the useful "your server died" diagnosis is destroyed by the very
+    command used to check state -- and every later command reads as though no
+    server was ever started.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ["DECLIB_SERVER_REGISTRY"] = self._tmp.name
+
+    def tearDown(self):
+        os.environ.pop("DECLIB_SERVER_REGISTRY", None)
+        self._tmp.cleanup()
+
+    def _dead_record(self):
+        from declib.api import server_registry
+        server_registry.register_server({
+            "id": "deadbeef01", "socket_path": "/nonexistent/x.sock",
+            "binary_path": "/tmp/gone", "backend": "ida", "pid": 999999,
+        })
+
+    def test_pruning_leaves_a_tombstone(self):
+        from declib.api import server_registry
+
+        self._dead_record()
+        self.assertEqual(server_registry.list_servers(), [])
+        stones = server_registry.list_tombstones()
+        self.assertEqual([s["id"] for s in stones], ["deadbeef01"])
+        self.assertEqual(stones[0]["binary_path"], "/tmp/gone")
+        self.assertIn("died_at", stones[0])
+
+    def test_diagnosis_survives_a_second_lookup(self):
+        """The regression: the first call pruned, so the second went blind."""
+        from declib.api import server_registry
+
+        self._dead_record()
+        server_registry.list_servers()          # first call eats the corpse
+        stones = server_registry.list_tombstones()
+        self.assertTrue(stones, "second lookup must still be able to explain")
+
+    def test_tombstones_are_not_mistaken_for_live_records(self):
+        from declib.api import server_registry
+
+        self._dead_record()
+        server_registry.list_servers()
+        # The tombstone is a *.json file in the same directory; it must never
+        # come back as a server.
+        self.assertEqual(server_registry.list_servers(), [])
+        self.assertIsNone(server_registry.find_server(server_id="deadbeef01"))
+
+    def test_reload_clears_the_tombstone(self):
+        from declib.api import server_registry
+
+        self._dead_record()
+        server_registry.list_servers()
+        self.assertTrue(server_registry.list_tombstones())
+        server_registry.clear_tombstone("deadbeef01")
+        self.assertEqual(server_registry.list_tombstones(), [])
+
+    def test_tombstones_are_capped(self):
+        """A hint, not a log -- they must not grow without bound."""
+        from declib.api import server_registry
+
+        for i in range(server_registry._TOMBSTONE_KEEP + 10):
+            server_registry.register_server({
+                "id": f"corpse{i:04d}", "socket_path": "/nonexistent/x.sock",
+                "binary_path": f"/tmp/gone{i}", "backend": "ida", "pid": 999999,
+            })
+            server_registry.list_servers()
+        self.assertLessEqual(len(server_registry.list_tombstones()),
+                             server_registry._TOMBSTONE_KEEP)
+
+
 class TestDisassembleRangeArgs(unittest.TestCase):
     """Range-disassembly plumbing that needs no backend or fixture binary."""
 

@@ -119,6 +119,83 @@ def _probe_socket(socket_path: str, timeout: float = 0.5) -> bool:
             pass
 
 
+# A pruned record is the only evidence that a server ever existed. Deleting it
+# outright means the *next* command can explain what happened but every command
+# after that cannot -- and the command agents run most is `list`, which prunes.
+# Measured on a 40-binary benchmark: only 10 of 79 "missing server" errors
+# carried the useful diagnosis; 69 had already had the corpse eaten by an
+# intervening `list`. So pruning leaves a tombstone behind instead.
+_TOMBSTONE_SUFFIX = ".dead.json"
+_TOMBSTONE_KEEP = 16
+
+
+def _tombstone_path(server_id: str) -> Path:
+    return _registry_dir() / f"{server_id}{_TOMBSTONE_SUFFIX}"
+
+
+def _write_tombstone(record: Dict) -> None:
+    """Record that a server died, so later commands can still say so."""
+    server_id = record.get("id")
+    if not server_id:
+        return
+    payload = dict(record)
+    payload["died_at"] = time.time()
+    try:
+        path = _tombstone_path(str(server_id))
+        tmp_path = path.with_suffix(".tmp")
+        with open(tmp_path, "w") as f:
+            json.dump(payload, f, indent=2, default=str)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        _l.debug("Failed to write tombstone for %s: %s", server_id, exc)
+        return
+    _trim_tombstones()
+
+
+def _trim_tombstones() -> None:
+    """Keep only the most recent tombstones; they are a hint, not a log."""
+    try:
+        stones = sorted(
+            _registry_dir().glob(f"*{_TOMBSTONE_SUFFIX}"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except Exception:
+        return
+    for old in stones[_TOMBSTONE_KEEP:]:
+        try:
+            old.unlink()
+        except Exception:
+            pass
+
+
+def list_tombstones() -> List[Dict]:
+    """Recently-died servers, newest first."""
+    out: List[Dict] = []
+    try:
+        stones = sorted(_registry_dir().glob(f"*{_TOMBSTONE_SUFFIX}"))
+    except FileNotFoundError:
+        return []
+    for entry in stones:
+        try:
+            with open(entry, "r") as f:
+                out.append(json.load(f))
+        except Exception:
+            continue
+    out.sort(key=lambda r: r.get("died_at") or 0, reverse=True)
+    return out
+
+
+def clear_tombstone(server_id: str) -> None:
+    """Forget a death -- called when a binary is successfully reloaded."""
+    try:
+        _tombstone_path(str(server_id)).unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+
 def _is_record_live(record: Dict) -> bool:
     pid = record.get("pid")
     socket_path = record.get("socket_path")
@@ -145,7 +222,10 @@ def list_servers(prune_stale: bool = True, pruned: Optional[List[Dict]] = None) 
     """
     records: List[Dict] = []
     try:
-        entries = sorted(_registry_dir().glob("*.json"))
+        entries = sorted(
+            e for e in _registry_dir().glob("*.json")
+            if not e.name.endswith(_TOMBSTONE_SUFFIX)
+        )
     except FileNotFoundError:
         return []
 
@@ -166,6 +246,7 @@ def list_servers(prune_stale: bool = True, pruned: Optional[List[Dict]] = None) 
         if prune_stale and not _is_record_live(record):
             if pruned is not None:
                 pruned.append(record)
+            _write_tombstone(record)
             try:
                 entry.unlink()
             except FileNotFoundError:
