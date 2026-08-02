@@ -63,7 +63,27 @@ recovery. If IDA fails to load the binary (missing license, unsupported
 file type, decompiler error), fall back to `--backend ghidra`, then
 `--backend angr` as a last resort.
 
-**Always start with `list_functions` and `list_strings`** — the same binary
+**On a small or medium binary, `export` first and grep the result.** One
+command decompiles everything to a directory, so orienting becomes a
+filesystem problem instead of dozens of round-trips:
+
+```bash
+decompiler load ./target --backend ida
+decompiler export --out ./dump --min-size 16   # skip PLT thunks; see below
+grep -rl 'flag\|serial\|password' ./dump/pseudo   # which functions matter
+```
+
+That writes `functions.json`, `strings.json` (with xrefs), and one
+`pseudo/<addr>_<name>.c` per function. On a 117-function binary it takes
+about 30 seconds and replaces the whole `list_functions` → `decompile` →
+`decompile` → … loop below. `--min-size 16` drops import stubs, which are
+typically ~80% of the function count and half the output bytes.
+
+Prefer the interrogative commands when `export` is a bad fit: a very large
+binary (thousands of functions — use `--filter`/`--limit` or skip it), or
+when you already know the one function you want.
+
+**Otherwise start with `list_functions` and `list_strings`** — the same binary
 can have the entry named `main` (angr), `FUN_00101c5c` (Ghidra), or
 `sub_101c5c` (IDA). Don't assume `main` exists.
 
