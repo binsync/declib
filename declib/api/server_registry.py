@@ -135,8 +135,14 @@ def _is_record_live(record: Dict) -> bool:
     return _probe_socket(socket_path)
 
 
-def list_servers(prune_stale: bool = True) -> List[Dict]:
-    """Return all server records, optionally dropping and removing stale entries."""
+def list_servers(prune_stale: bool = True, pruned: Optional[List[Dict]] = None) -> List[Dict]:
+    """Return all server records, optionally dropping and removing stale entries.
+
+    Pass a list as ``pruned`` to receive the records that were removed. Without
+    it, a server that has died is simply gone, and a caller can only report
+    "no server matches" — which reads as "you never started one" rather than
+    "yours died, here is how to bring it back".
+    """
     records: List[Dict] = []
     try:
         entries = sorted(_registry_dir().glob("*.json"))
@@ -158,6 +164,8 @@ def list_servers(prune_stale: bool = True) -> List[Dict]:
             continue
 
         if prune_stale and not _is_record_live(record):
+            if pruned is not None:
+                pruned.append(record)
             try:
                 entry.unlink()
             except FileNotFoundError:
@@ -203,11 +211,16 @@ def find_servers(
     binary_path: Optional[str] = None,
     binary_hash: Optional[str] = None,
     backend: Optional[str] = None,
+    pruned: Optional[List[Dict]] = None,
 ) -> List[Dict]:
-    """Return all server records matching the provided filters."""
+    """Return all server records matching the provided filters.
+
+    ``pruned`` is forwarded to :func:`list_servers`; pass a list to learn which
+    dead servers were reaped during this lookup.
+    """
     matches: List[Dict] = []
     binary_path_resolved = str(Path(binary_path).expanduser().resolve()) if binary_path else None
-    for record in list_servers():
+    for record in list_servers(pruned=pruned):
         if binary_path_resolved:
             record_path = record.get("binary_path")
             if not record_path:
