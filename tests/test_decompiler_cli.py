@@ -2250,6 +2250,78 @@ class TestExportArgs(unittest.TestCase):
         self.assertEqual(_safe_filename("", 0x55), "00000055.c")
         # Two same-named functions at different addresses cannot collide.
         self.assertNotEqual(_safe_filename("f", 1), _safe_filename("f", 2))
+class TestServerStartupDiagnostics(unittest.TestCase):
+    """Startup/teardown diagnostics. No backend required."""
+
+    def test_backend_hint_matches_the_backend(self):
+        """The old text named GHIDRA_INSTALL_DIR whatever the backend was."""
+        from declib.cli.decompiler_cli import _backend_start_hint
+
+        self.assertIn("GHIDRA_INSTALL_DIR", _backend_start_hint("ghidra"))
+        for other in ("ida", "binja", "angr", "jadx"):
+            with self.subTest(backend=other):
+                hint = _backend_start_hint(other)
+                self.assertNotIn("GHIDRA_INSTALL_DIR", hint)
+                self.assertIn(other, hint)
+        # Unknown/absent backend still gets something actionable.
+        self.assertIn("backend status", _backend_start_hint(None))
+
+    def test_database_lock_gets_an_explanation(self):
+        """A bare "Failed to open database" reads like corruption."""
+        import tempfile as _tf
+        from declib.cli.decompiler_cli import _server_start_error
+
+        with _tf.NamedTemporaryFile("w", suffix=".log", delete=False) as fh:
+            fh.write("ERROR - Failed to start server: Failed to open database /tmp/x\n")
+            log = Path(fh.name)
+        try:
+            text = str(_server_start_error("server died", log))
+            self.assertIn("already holds this project's database", text)
+            self.assertIn("--replace", text)
+            self.assertIn("--project-dir", text)
+        finally:
+            log.unlink()
+
+    def test_unrelated_failure_gets_no_lock_advice(self):
+        import tempfile as _tf
+        from declib.cli.decompiler_cli import _server_start_error
+
+        with _tf.NamedTemporaryFile("w", suffix=".log", delete=False) as fh:
+            fh.write("ERROR - Failed to start server: no such file\n")
+            log = Path(fh.name)
+        try:
+            self.assertNotIn("already holds", str(_server_start_error("died", log)))
+        finally:
+            log.unlink()
+
+
+class TestRegistryPruneReporting(unittest.TestCase):
+    """list_servers must be able to say what it reaped."""
+
+    def test_pruned_records_are_reported(self):
+        import tempfile as _tf
+        from declib.api import server_registry as reg
+
+        with _tf.TemporaryDirectory() as tmp:
+            os.environ["DECLIB_SERVER_REGISTRY"] = tmp
+            try:
+                dead = {
+                    "id": "deadbeef01",
+                    "pid": 999999,          # not a live process
+                    "binary_path": "/tmp/gone",
+                    "backend": "ida",
+                    "socket_path": os.path.join(tmp, "nope.sock"),
+                }
+                Path(tmp, "deadbeef01.json").write_text(json.dumps(dead))
+
+                reaped = []
+                live = reg.list_servers(pruned=reaped)
+                self.assertEqual(live, [])
+                self.assertEqual([r["id"] for r in reaped], ["deadbeef01"])
+                # The caller can now name the binary in its error message.
+                self.assertEqual(reaped[0]["binary_path"], "/tmp/gone")
+            finally:
+                os.environ.pop("DECLIB_SERVER_REGISTRY", None)
 class TestDisassembleRangeArgs(unittest.TestCase):
     """Range-disassembly plumbing that needs no backend or fixture binary."""
 
