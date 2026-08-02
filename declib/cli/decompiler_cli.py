@@ -367,23 +367,60 @@ def _wait_for_server(
 _IDA_UNPACKED_SUFFIXES = (".id0", ".id1", ".id2", ".nam", ".til")
 
 
+def _live_server_pid_for_project(project_dir: Path) -> Optional[int]:
+    """PID of a running declib server whose --project-dir is `project_dir`.
+
+    Reads the process table rather than the registry, because the registry can
+    lose a live server and this decides whether we delete its database.
+    """
+    try:
+        import psutil
+    except Exception:
+        # Without psutil we cannot prove the project is unowned, so assume it is.
+        return -1
+    target = str(project_dir.resolve())
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            cmdline = proc.info.get("cmdline") or []
+            if "--server" not in cmdline or "--project-dir" not in cmdline:
+                continue
+            idx = cmdline.index("--project-dir")
+            if idx + 1 >= len(cmdline):
+                continue
+            if str(Path(cmdline[idx + 1]).resolve()) == target:
+                return int(proc.info["pid"])
+        except Exception:
+            continue
+    return None
+
+
 def _clear_stale_ida_database(project_dir: Optional[Path], backend: str) -> list[str]:
     """Remove crash residue that would otherwise poison this project forever.
 
-    Only called when no live server is registered for this project, so anything
-    unpacked here is left over from a process that died without repacking. The
-    saved analysis lives in the .i64/.idb, which is deliberately preserved -- we
-    remove only the unpacked components, so a reload restores the saved work and
-    re-derives whatever was merely cached.
+    The saved analysis lives in the .i64/.idb, which is deliberately preserved
+    -- we remove only the unpacked components, so a reload restores the saved
+    work and re-derives whatever was merely cached.
 
     Observed on a 40-binary benchmark: 64 of 80 DecLib failures were this, with
     the same binary failing up to 7 times in a row because nothing ever cleared
     the residue.
+
+    IMPORTANT: "no live server" is established by looking at *processes*, not
+    the registry. The registry is not a reliable witness -- a running server can
+    be missing from it (seen repeatedly: `decompiler list` returning zero while
+    `ps` showed four healthy servers), and trusting it here means deleting the
+    unpacked database of a server that is still using it. That turns a
+    registry glitch into real corruption, so the check has to be against
+    something that cannot silently lose a live process.
     """
     if backend != IDA_DECOMPILER or project_dir is None:
         return []
     root = project_dir if project_dir.is_dir() else None
     if root is None:
+        return []
+    owner = _live_server_pid_for_project(root)
+    if owner is not None:
+        _l.debug("Not clearing %s: server pid %s is still using it", root, owner)
         return []
     removed = []
     for candidate in sorted(root.rglob("*")):
