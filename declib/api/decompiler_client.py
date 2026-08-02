@@ -595,6 +595,13 @@ class DecompilerClient:
             "args": [list(addrs)], "kwargs": kwargs,
         })
 
+    def apply_annotations(self, items: List[Dict]) -> Dict[str, int]:
+        """Apply many comments/renames in one round-trip."""
+        return self._send_request({
+            "type": "method_call", "method_name": "apply_annotations",
+            "args": [list(items)],
+        })
+
     def disassemble_range(self, start: int, end: int, **kwargs) -> Optional[str]:
         """Disassemble an arbitrary address span, function or not."""
         return self._send_request({

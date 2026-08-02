@@ -797,10 +797,20 @@ def _execute_batch_operation(operation: Dict, batch_args) -> Dict:
             )
     for option in ("--raw", "--help", "-h"):
         if _batch_option_present(argv, option):
+            # Rejecting --raw is correct: batch results are structured, and raw
+            # text printed straight to stdout would corrupt them. But saying
+            # only "not allowed" leaves the caller guessing, so name the
+            # replacement -- the text they wanted is already in the result.
+            if option == "--raw":
+                error = ("--raw is not allowed inside a structured batch: batch "
+                         "results are always JSON. Drop it — each entry's text "
+                         "is in results[].result.text.")
+            else:
+                error = f"{option} is not allowed inside a structured batch."
             return _batch_result(
                 operation,
                 exit_code=EXIT_USER_ERROR,
-                error=f"{option} is not allowed inside a structured batch.",
+                error=error,
                 duration_ms=0,
             )
 
@@ -2145,6 +2155,76 @@ def cmd_export(args) -> int:
                 print(f"  {len(failed)} function(s) did not decompile "
                       f"(listed in export.json)")
     return EXIT_OK
+def cmd_annotate(args) -> int:
+    """Apply a batch of comments and renames in one call.
+
+    Annotation is produced in bulk -- you read a binary, build up a mapping of
+    address to label, and want to write it back. Doing that one `comment set`
+    at a time is N round-trips, which is why people reach for the raw backend
+    API instead.
+
+    Input is JSON on stdin (or --file): either a list of records, or an object
+    mapping address to a comment. Records look like:
+
+        {"addr": "0x401000", "comment": "parses the header", "name": "parse_hdr"}
+    """
+    raw = Path(args.file).read_text() if args.file else sys.stdin.read()
+    if not raw.strip():
+        raise SystemExit("no annotation input (give JSON on stdin or --file)")
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"input is not valid JSON: {e}")
+
+    # Accept the shorthand {"0x401000": "a comment", ...} as well as records,
+    # because that is the shape people already build by hand.
+    records: List[Dict] = []
+    if isinstance(parsed, dict):
+        for key, value in parsed.items():
+            if isinstance(value, dict):
+                records.append({"addr": key, **value})
+            else:
+                records.append({"addr": key, "comment": value})
+    elif isinstance(parsed, list):
+        records = list(parsed)
+    else:
+        raise SystemExit("expected a JSON list of records or an object keyed by address")
+
+    with _with_client(args) as client:
+        items: List[Dict] = []
+        for rec in records:
+            if not isinstance(rec, dict) or "addr" not in rec:
+                raise SystemExit(f"every record needs an 'addr': {rec!r}")
+            addr_value, _ = _parse_target(str(rec["addr"]))
+            if addr_value is None:
+                raise SystemExit(f"invalid address {rec['addr']!r}")
+            item = {"addr": _to_lifted_addr(client, addr_value)}
+            if rec.get("comment") is not None:
+                item["comment"] = str(rec["comment"])
+            if rec.get("name") is not None:
+                item["name"] = str(rec["name"])
+            if len(item) == 1:
+                raise SystemExit(
+                    f"record for {rec['addr']} has neither 'comment' nor 'name'"
+                )
+            items.append(item)
+
+        if not items:
+            raise SystemExit("nothing to apply")
+
+        result = client.apply_annotations(items) or {}
+        result["requested"] = len(items)
+        if args.json:
+            _emit(args, result)
+        else:
+            print(f"applied {result.get('comments', 0)} comment(s) and "
+                  f"{result.get('names', 0)} rename(s) from {len(items)} record(s)")
+            for err in result.get("errors") or []:
+                where = err.get("addr")
+                where = _format_addr_hex(where) if isinstance(where, int) else where
+                print(f"  failed {where} ({err.get('field')}): {err.get('error')}",
+                      file=sys.stderr)
+    return EXIT_OK if not result.get("failed") else EXIT_USER_ERROR
 
 
 def cmd_get_callers(args) -> int:
@@ -3097,6 +3177,15 @@ def build_parser() -> argparse.ArgumentParser:
     _add_server_filter_args(p_export)
     _add_output_args(p_export)
     p_export.set_defaults(func=cmd_export)
+    p_annotate = sub.add_parser(
+        "annotate",
+        help="Apply many comments/renames at once from JSON (stdin or --file).",
+    )
+    p_annotate.add_argument("--file",
+                            help="Read JSON from this path instead of stdin.")
+    _add_server_filter_args(p_annotate)
+    _add_output_args(p_annotate)
+    p_annotate.set_defaults(func=cmd_annotate)
 
     p_lf = sub.add_parser("list_functions", help="List functions in the binary.")
     p_lf.add_argument("--filter", dest="filter", help="Regex to filter function names.")

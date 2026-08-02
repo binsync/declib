@@ -2250,6 +2250,76 @@ class TestExportArgs(unittest.TestCase):
         self.assertEqual(_safe_filename("", 0x55), "00000055.c")
         # Two same-named functions at different addresses cannot collide.
         self.assertNotEqual(_safe_filename("f", 1), _safe_filename("f", 2))
+class TestAnnotateBatch(unittest.TestCase):
+    """Bulk annotation plumbing that needs no backend."""
+
+    def _apply(self, items):
+        """Run apply_annotations against a stand-in interface."""
+        from declib.api.decompiler_interface import DecompilerInterface
+
+        class _Fake(DecompilerInterface):
+            def __init__(self):
+                self.comments = {}
+                self.functions = {}
+                self._warnings = []
+
+            def warning(self, msg):
+                self._warnings.append(msg)
+
+        fake = _Fake()
+        return fake, DecompilerInterface.apply_annotations(fake, items)
+
+    def test_missing_address_is_reported_not_raised(self):
+        _, res = self._apply([{"comment": "orphan"}])
+        self.assertEqual(res["failed"], 1)
+        self.assertEqual(res["errors"][0]["field"], "addr")
+
+    def test_record_with_neither_field_is_reported(self):
+        _, res = self._apply([{"addr": 0x1000}])
+        self.assertEqual(res["failed"], 1)
+        self.assertIn("neither", res["errors"][0]["error"])
+
+    def test_one_bad_record_does_not_discard_the_batch(self):
+        fake, res = self._apply([
+            {"addr": 0x1000, "comment": "kept"},
+            {"addr": 0x2000},                      # invalid
+            {"addr": 0x3000, "comment": "also kept"},
+        ])
+        self.assertEqual(res["comments"], 2)
+        self.assertEqual(res["failed"], 1)
+
+    def test_failure_reason_is_never_blank(self):
+        """A bare exception must not surface as 'failed 0x...: '."""
+        from declib.api.decompiler_interface import DecompilerInterface
+
+        class _Exploding(DecompilerInterface):
+            def __init__(self):
+                self.comments = self
+                self.functions = {}
+
+            def __setitem__(self, key, value):
+                raise KeyError()      # empty str(), the blank-error case
+
+            def warning(self, msg):
+                pass
+
+        fake = _Exploding()
+        res = DecompilerInterface.apply_annotations(fake, [{"addr": 0x1000, "comment": "x"}])
+        self.assertEqual(res["failed"], 1)
+        text = res["errors"][0]["error"]
+        self.assertTrue(text.strip(), "error text was blank")
+        self.assertIn("KeyError", text)
+
+
+class TestBatchRawMessage(unittest.TestCase):
+    def test_raw_rejection_names_the_replacement(self):
+        """Rejecting --raw is right; leaving the caller guessing is not."""
+        from declib.cli.decompiler_cli import _execute_batch_operation
+
+        result = _execute_batch_operation(
+            {"id": "x", "argv": ["decompile", "0x1000", "--raw"]}, None
+        )
+        self.assertIn("results[].result.text", result["error"])
 class TestServerStartupDiagnostics(unittest.TestCase):
     """Startup/teardown diagnostics. No backend required."""
 
