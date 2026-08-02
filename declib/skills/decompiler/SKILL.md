@@ -60,8 +60,9 @@ narrowing to an interesting method.
 **Always prefer IDA Pro when it's available** (`--backend ida`) — it
 generally produces the cleanest decompilation and the most accurate type
 recovery. If IDA fails to load the binary (missing license, unsupported
-file type, decompiler error), fall back to `--backend ghidra`, then
-`--backend angr` as a last resort.
+file type, decompiler error), fall back to `--backend binja` if it is
+licensed here, then `--backend ghidra`, then `--backend angr` as a last
+resort.
 
 **On a small or medium binary, `export` first and grep the result.** One
 command decompiles everything to a directory, so orienting becomes a
@@ -88,7 +89,7 @@ can have the entry named `main` (angr), `FUN_00101c5c` (Ghidra), or
 `sub_101c5c` (IDA). Don't assume `main` exists.
 
 ```bash
-decompiler load ./target --backend ida         # prefer IDA; fall back to ghidra if it fails
+decompiler load ./target --backend ida         # prefer IDA; fall back to binja, then ghidra
 decompiler list_functions                      # enumerate every function — pick a real entry
 decompiler list_functions --filter 'main|auth' # or narrow by regex
 decompiler list_strings --filter 'flag|pass'   # find interesting string constants
@@ -101,8 +102,8 @@ initial analysis. Successful JSON output includes the persistent `log_path`.
 
 Typical first-hour workflow on a stripped binary:
 
-1. `decompiler load ./bin --backend ida` (fall back to `--backend ghidra`,
-   then `--backend angr`, if IDA can't open the binary)
+1. `decompiler load ./bin --backend ida` (fall back to `--backend binja`,
+   then `--backend ghidra`, then `--backend angr`, if IDA can't open it)
 2. `decompiler list_functions` → note non-stub function names + sizes
 3. `decompiler list_strings` → look for error messages, user prompts,
    format strings — they often point at the interesting code
@@ -171,14 +172,20 @@ second server alongside the existing one).
 **Default: IDA Pro.** Use `--backend ida` whenever IDA is installed and
 licensed — its decompilation is the most reliable across architectures.
 Only switch backends if IDA fails to load the binary (the `load` call
-errors, or analysis stalls); fall through in this order: `ida → ghidra
-→ angr`. Use `binja` only when explicitly requested.
+errors, or analysis stalls); fall through in this order: `ida → binja →
+ghidra → angr`.
+
+Check what is actually licensed here before falling back — `decompiler
+backend status binja --json` reports `available` in one call. Binary Ninja
+outranks Ghidra when it is available: its decompilation is closer to IDA's,
+and a licensed backend is the one worth using. Skip to `ghidra` when binja
+reports unavailable (no license, not installed).
 
 ```bash
 decompiler load ./my-binary --backend ida      # PREFERRED: IDA Pro (needs install + license)
+decompiler load ./my-binary --backend binja    # 2nd CHOICE: Binary Ninja (needs license)
 decompiler load ./my-binary --backend ghidra   # FALLBACK: needs GHIDRA_INSTALL_DIR
 decompiler load ./my-binary --backend angr     # LAST RESORT: pure-Python, always available
-decompiler load ./my-binary --backend binja    # Binary Ninja, needs license
 decompiler load ./challenge.apk --backend jadx # Java/Android managed code
 ```
 
