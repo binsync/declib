@@ -826,10 +826,20 @@ def _execute_batch_operation(operation: Dict, batch_args) -> Dict:
             )
     for option in ("--raw", "--help", "-h"):
         if _batch_option_present(argv, option):
+            # Rejecting --raw is correct: batch results are structured, and raw
+            # text printed straight to stdout would corrupt them. But saying
+            # only "not allowed" leaves the caller guessing, so name the
+            # replacement -- the text they wanted is already in the result.
+            if option == "--raw":
+                error = ("--raw is not allowed inside a structured batch: batch "
+                         "results are always JSON. Drop it — each entry's text "
+                         "is in results[].result.text.")
+            else:
+                error = f"{option} is not allowed inside a structured batch."
             return _batch_result(
                 operation,
                 exit_code=EXIT_USER_ERROR,
-                error=f"{option} is not allowed inside a structured batch.",
+                error=error,
                 duration_ms=0,
             )
 
@@ -1140,7 +1150,213 @@ def cmd_decompile(args) -> int:
     return 0
 
 
+# Capstone (arch, mode) by the name users pass to --arch. Keys match the
+# spelling `objdump -m` accepts where practical, so the muscle memory carries
+# over.
+_CAPSTONE_ARCHS = {
+    "x86-64": ("CS_ARCH_X86", "CS_MODE_64"),
+    "x86": ("CS_ARCH_X86", "CS_MODE_32"),
+    "x86-16": ("CS_ARCH_X86", "CS_MODE_16"),
+    "arm64": ("CS_ARCH_ARM64", "CS_MODE_ARM"),
+    "arm": ("CS_ARCH_ARM", "CS_MODE_ARM"),
+    "thumb": ("CS_ARCH_ARM", "CS_MODE_THUMB"),
+    "mips": ("CS_ARCH_MIPS", "CS_MODE_MIPS32"),
+    "mips64": ("CS_ARCH_MIPS", "CS_MODE_MIPS64"),
+    "ppc": ("CS_ARCH_PPC", "CS_MODE_32"),
+    "ppc64": ("CS_ARCH_PPC", "CS_MODE_64"),
+    "riscv32": ("CS_ARCH_RISCV", "CS_MODE_RISCV32"),
+    "riscv64": ("CS_ARCH_RISCV", "CS_MODE_RISCV64"),
+    "sparc": ("CS_ARCH_SPARC", "CS_MODE_BIG_ENDIAN"),
+}
+
+# angr reports arch names via archinfo; map the common ones onto --arch keys
+# so auto-detection works on that backend. Other backends do not implement
+# `binary_arch`, which is why --arch exists and why the default is explicit.
+_ANGR_ARCH_ALIASES = {
+    "AMD64": "x86-64", "X86": "x86", "AARCH64": "arm64", "ARMEL": "arm",
+    "ARMHF": "arm", "ARMCortexM": "thumb", "MIPS32": "mips", "MIPS64": "mips64",
+    "PPC32": "ppc", "PPC64": "ppc64", "RISCV32": "riscv32", "RISCV64": "riscv64",
+}
+
+
+def _detect_arch(client) -> Optional[str]:
+    """Best-effort arch detection. Only angr implements ``binary_arch``.
+
+    A backend without it (IDA, Ghidra) raises server-side, which the client
+    logs at ERROR. That is an expected answer here, not a fault, so the probe
+    is silenced — otherwise every range disassembly on IDA prints a red line
+    that looks like a real failure.
+    """
+    client_log = logging.getLogger("declib.api.decompiler_client")
+    previous = client_log.level
+    client_log.setLevel(logging.CRITICAL)
+    try:
+        raw = client.binary_arch
+    except Exception:
+        return None
+    finally:
+        client_log.setLevel(previous)
+    if not raw:
+        return None
+    return _ANGR_ARCH_ALIASES.get(str(raw), None)
+
+
+def _capstone_range(args, client, start: int, stop: int) -> Optional[Dict]:
+    """Fallback: disassemble raw bytes when the backend has no native range.
+
+    Output is unsymbolized (``call 0x401000``, not ``call sub_401000``), so
+    this is strictly a second choice — see ``_disassemble_range``.
+    """
+    try:
+        import capstone
+    except ImportError:
+        return None
+
+    arch = args.arch or _detect_arch(client) or "x86-64"
+    if arch not in _CAPSTONE_ARCHS:
+        raise SystemExit(
+            f"unknown --arch {arch!r}; choose from: "
+            + ", ".join(sorted(_CAPSTONE_ARCHS))
+        )
+
+    data = client.read_memory(start, stop - start)
+    if not data:
+        return None
+
+    arch_const, mode_const = _CAPSTONE_ARCHS[arch]
+    md = capstone.Cs(getattr(capstone, arch_const), getattr(capstone, mode_const))
+    md.skipdata = True  # undecodable bytes become .byte, never truncate the run
+
+    lines, insns = [], []
+    for insn in md.disasm(data, start):
+        text = f"{insn.mnemonic} {insn.op_str}".strip()
+        lines.append(f"{insn.address:#018x}  {text}")
+        insns.append({
+            "addr": insn.address,
+            "size": insn.size,
+            "bytes": insn.bytes.hex(),
+            "text": text,
+        })
+    if not insns:
+        return None
+    return {
+        "source": "capstone",
+        "arch": arch,
+        "bytes_read": len(data),
+        "instruction_count": len(insns),
+        "instructions": insns,
+        "text": "\n".join(lines),
+    }
+
+
+# Backends format a disassembly line as "<addr><sep><text>", but disagree on
+# the separator ("0x4da0:\tpush rbp" for ghidra/angr, "0000...4da0  push rbp"
+# for ida). Parse both so the structured output is identical either way.
+_NATIVE_LINE_RE = re.compile(r"^\s*(?:0x)?([0-9a-fA-F]+)\s*:?\s+(.*)$")
+
+
+def _native_payload(source: str, text: str) -> Dict:
+    """Give native backend output the same shape as the capstone fallback.
+
+    Both paths must return the same JSON, or a consumer has to branch on
+    `source` to read a result. Every entry carries ``addr``, ``text`` and
+    ``size``; ``bytes`` is capstone-only, because native disassembly text does
+    not include the raw encoding.
+
+    ``size`` is derived from the gap to the next instruction — the backends
+    print addresses, not lengths. The final instruction has no successor to
+    measure against, so it is omitted rather than guessed.
+    """
+    instructions = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        match = _NATIVE_LINE_RE.match(line)
+        if not match:
+            continue
+        try:
+            addr = int(match.group(1), 16)
+        except ValueError:
+            continue
+        instructions.append({"addr": addr, "text": match.group(2).strip()})
+
+    for current, following in zip(instructions, instructions[1:]):
+        gap = following["addr"] - current["addr"]
+        if gap > 0:
+            current["size"] = gap
+
+    return {
+        "source": source,
+        "text": text,
+        "instruction_count": len(instructions),
+        "instructions": instructions,
+    }
+
+
+def _disassemble_range(args, client) -> int:
+    """Disassemble an arbitrary address range, independent of functions.
+
+    Prefers the backend's own ``disassemble_range``, which keeps its
+    symbolization (``call sub_401000`` rather than ``call 0x401000``) and its
+    knowledge of what is actually mapped. Falls back to reading raw bytes and
+    running capstone over them for backends that do not implement it.
+    """
+    start, _ = _parse_target(args.start)
+    if start is None:
+        raise SystemExit(f"--start must be an address, got {args.start!r}")
+
+    if args.stop is not None:
+        stop, _ = _parse_target(args.stop)
+        if stop is None:
+            raise SystemExit(f"--stop must be an address, got {args.stop!r}")
+    else:
+        stop = start + args.count
+    if stop <= start:
+        raise SystemExit(
+            f"empty range: --stop 0x{stop:x} is not above --start 0x{start:x}"
+        )
+
+    # Refuse an unmapped start where the backend can tell us. IDA answers such
+    # reads with 0xff filler rather than failing, so without this the caller
+    # gets a screen of plausible-looking garbage instead of an error.
+    try:
+        mapped = client.is_mapped(start)
+    except Exception:
+        mapped = None
+    if mapped is False:
+        raise SystemExit(f"0x{start:x} is not mapped in this program")
+
+    payload: Optional[Dict] = None
+    try:
+        native = client.disassemble_range(start, stop)
+    except Exception:
+        native = None
+    if native:
+        payload = _native_payload(client.name, native)
+    else:
+        payload = _capstone_range(args, client, start, stop)
+
+    if payload is None:
+        raise SystemExit(
+            f"could not disassemble 0x{start:x}-0x{stop:x}: the backend has no "
+            "native range disassembly and reading the bytes failed "
+            "(install capstone for the raw fallback)"
+        )
+
+    payload = {"start": start, "stop": stop, **payload}
+    if getattr(args, "raw", False):
+        print(payload["text"])
+        return EXIT_OK
+    _emit(args, payload, text_field="text")
+    return EXIT_OK
+
+
 def cmd_disassemble(args) -> int:
+    if getattr(args, "start", None) is not None:
+        with _with_client(args) as client:
+            return _disassemble_range(args, client)
+    if not args.target:
+        raise SystemExit("give a function (target) or an address range (--start)")
     with _with_client(args) as client:
         addr = _resolve_function_addr(client, args.target)
         known = _known_function_addrs(client)
@@ -1873,15 +2089,25 @@ def cmd_export(args) -> int:
     with _with_client(args) as client:
         pattern = re.compile(args.filter) if args.filter else None
         functions = []
+        skipped_small = 0
         for addr, func in sorted(client.functions.items(), key=lambda kv: kv[0]):
             name = getattr(func, "name", None) or ""
             if pattern and not pattern.search(name) and not pattern.search(hex(addr)):
+                continue
+            size = getattr(func, "size", 0) or 0
+            # Import stubs dominate the function count of any dynamically
+            # linked binary and carry no information -- on a sample crackme,
+            # 93 of 117 functions were PLT thunks, and they accounted for 45%
+            # of the exported pseudocode. Skipping them is what makes the
+            # output small enough to read rather than only grep.
+            if args.min_size and size < args.min_size:
+                skipped_small += 1
                 continue
             functions.append({
                 "addr": addr,
                 "addr_hex": hex(addr),
                 "name": name,
-                "size": getattr(func, "size", 0) or 0,
+                "size": size,
             })
 
         if args.limit and len(functions) > args.limit:
@@ -1945,6 +2171,7 @@ def cmd_export(args) -> int:
             "failed": sorted(failed),
             "failed_count": len(failed),
             "string_count": len(strings),
+            "skipped_below_min_size": skipped_small,
         }
         (out_dir / "export.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
@@ -1957,6 +2184,76 @@ def cmd_export(args) -> int:
                 print(f"  {len(failed)} function(s) did not decompile "
                       f"(listed in export.json)")
     return EXIT_OK
+def cmd_annotate(args) -> int:
+    """Apply a batch of comments and renames in one call.
+
+    Annotation is produced in bulk -- you read a binary, build up a mapping of
+    address to label, and want to write it back. Doing that one `comment set`
+    at a time is N round-trips, which is why people reach for the raw backend
+    API instead.
+
+    Input is JSON on stdin (or --file): either a list of records, or an object
+    mapping address to a comment. Records look like:
+
+        {"addr": "0x401000", "comment": "parses the header", "name": "parse_hdr"}
+    """
+    raw = Path(args.file).read_text() if args.file else sys.stdin.read()
+    if not raw.strip():
+        raise SystemExit("no annotation input (give JSON on stdin or --file)")
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"input is not valid JSON: {e}")
+
+    # Accept the shorthand {"0x401000": "a comment", ...} as well as records,
+    # because that is the shape people already build by hand.
+    records: List[Dict] = []
+    if isinstance(parsed, dict):
+        for key, value in parsed.items():
+            if isinstance(value, dict):
+                records.append({"addr": key, **value})
+            else:
+                records.append({"addr": key, "comment": value})
+    elif isinstance(parsed, list):
+        records = list(parsed)
+    else:
+        raise SystemExit("expected a JSON list of records or an object keyed by address")
+
+    with _with_client(args) as client:
+        items: List[Dict] = []
+        for rec in records:
+            if not isinstance(rec, dict) or "addr" not in rec:
+                raise SystemExit(f"every record needs an 'addr': {rec!r}")
+            addr_value, _ = _parse_target(str(rec["addr"]))
+            if addr_value is None:
+                raise SystemExit(f"invalid address {rec['addr']!r}")
+            item = {"addr": _to_lifted_addr(client, addr_value)}
+            if rec.get("comment") is not None:
+                item["comment"] = str(rec["comment"])
+            if rec.get("name") is not None:
+                item["name"] = str(rec["name"])
+            if len(item) == 1:
+                raise SystemExit(
+                    f"record for {rec['addr']} has neither 'comment' nor 'name'"
+                )
+            items.append(item)
+
+        if not items:
+            raise SystemExit("nothing to apply")
+
+        result = client.apply_annotations(items) or {}
+        result["requested"] = len(items)
+        if args.json:
+            _emit(args, result)
+        else:
+            print(f"applied {result.get('comments', 0)} comment(s) and "
+                  f"{result.get('names', 0)} rename(s) from {len(items)} record(s)")
+            for err in result.get("errors") or []:
+                where = err.get("addr")
+                where = _format_addr_hex(where) if isinstance(where, int) else where
+                print(f"  failed {where} ({err.get('field')}): {err.get('error')}",
+                      file=sys.stderr)
+    return EXIT_OK if not result.get("failed") else EXIT_USER_ERROR
 
 
 def cmd_get_callers(args) -> int:
@@ -2897,6 +3194,11 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Only export functions whose name or hex address matches this regex.")
     p_export.add_argument("--limit", type=int, default=2000,
                           help="Cap on functions exported (default 2000; 0 for no cap).")
+    p_export.add_argument("--min-size", type=int, default=0,
+                          help="Skip functions smaller than this many bytes. "
+                               "Import stubs/PLT thunks are usually the bulk of "
+                               "a function list and carry no information; "
+                               "--min-size 16 drops them. Default 0 (export all).")
     p_export.add_argument("--batch-size", type=int, default=25,
                           help="Functions decompiled per round-trip (default 25).")
     p_export.add_argument("--no-string-xrefs", action="store_true",
@@ -2904,6 +3206,15 @@ def build_parser() -> argparse.ArgumentParser:
     _add_server_filter_args(p_export)
     _add_output_args(p_export)
     p_export.set_defaults(func=cmd_export)
+    p_annotate = sub.add_parser(
+        "annotate",
+        help="Apply many comments/renames at once from JSON (stdin or --file).",
+    )
+    p_annotate.add_argument("--file",
+                            help="Read JSON from this path instead of stdin.")
+    _add_server_filter_args(p_annotate)
+    _add_output_args(p_annotate)
+    p_annotate.set_defaults(func=cmd_annotate)
 
     p_lf = sub.add_parser("list_functions", help="List functions in the binary.")
     p_lf.add_argument("--filter", dest="filter", help="Regex to filter function names.")
@@ -3117,8 +3428,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_dec.set_defaults(func=cmd_decompile)
 
     # disassemble
-    p_dis = sub.add_parser("disassemble", help="Disassemble a function by name or address.")
-    p_dis.add_argument("target", help="Function name or address (hex/decimal).")
+    p_dis = sub.add_parser(
+        "disassemble",
+        help="Disassemble a function, or an arbitrary address range with --start.",
+    )
+    p_dis.add_argument("target", nargs="?",
+                       help="Function name or address (hex/decimal). Omit when using --start.")
+    p_dis.add_argument("--start",
+                       help="Disassemble an address range instead of a function. "
+                            "Works on any mapped span, analyzed or not.")
+    p_dis.add_argument("--stop",
+                       help="End of the range, exclusive. Defaults to --start plus --count.")
+    p_dis.add_argument("--count", type=int, default=64,
+                       help="Bytes to disassemble when --stop is omitted (default: 64).")
+    p_dis.add_argument("--arch", choices=sorted(_CAPSTONE_ARCHS),
+                       help="Architecture for range disassembly. Auto-detected where the "
+                            "backend reports one, else x86-64.")
     p_dis.add_argument("--raw", action="store_true",
                        help="Print the disassembly text directly (no JSON or header wrapping).")
     _add_server_filter_args(p_dis)

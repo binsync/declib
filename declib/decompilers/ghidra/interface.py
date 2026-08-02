@@ -541,6 +541,63 @@ class GhidraDecompilerInterface(DecompilerInterface):
             return None
         return "\n".join(lines) if lines else None
 
+    def _symbolize_operands(self, text: str, space) -> str:
+        """Replace bare target addresses with the names Ghidra knows.
+
+        ``str(instruction)`` renders operands numerically ("CALL 0x00400510"),
+        which is exactly the output that sends someone back to a real
+        disassembler. The names are in the symbol table; this consults them.
+        """
+        symbol_table = self.currentProgram.getSymbolTable()
+
+        def _sub(match: "re.Match[str]") -> str:
+            try:
+                target = space.getAddress(int(match.group(0), 16))
+            except Exception:
+                return match.group(0)
+            try:
+                symbol = symbol_table.getPrimarySymbol(target)
+            except Exception:
+                return match.group(0)
+            if symbol is None:
+                return match.group(0)
+            name = str(symbol.getName())
+            return name or match.group(0)
+
+        return re.sub(r"0x[0-9a-fA-F]+", _sub, text)
+
+    def disassemble_range(self, start: int, end: int, **kwargs) -> Optional[str]:
+        """Ghidra-native disassembly for [start, end), operands symbolized."""
+        lo = self.art_lifter.lower_addr(start)
+        hi = self.art_lifter.lower_addr(end)
+        lines: List[str] = []
+        try:
+            listing = self.currentProgram.getListing()
+            space = self.currentProgram.getAddressFactory().getDefaultAddressSpace()
+            insn = listing.getInstructionAt(space.getAddress(lo))
+            if insn is None:
+                insn = listing.getInstructionAfter(space.getAddress(lo))
+            while insn is not None:
+                addr = int(insn.getAddress().getOffset())
+                if addr >= hi:
+                    break
+                rendered = self._symbolize_operands(str(insn), space)
+                lines.append(f"0x{self.art_lifter.lift_addr(addr):x}:\t{rendered}")
+                insn = listing.getInstructionAfter(insn.getAddress())
+        except Exception as exc:
+            _l.warning("Ghidra disassemble_range failed: %s", exc)
+            return None
+        return "\n".join(lines) if lines else None
+
+    def is_mapped(self, addr: int) -> Optional[bool]:
+        try:
+            lowered = self.art_lifter.lower_addr(addr)
+            space = self.currentProgram.getAddressFactory().getDefaultAddressSpace()
+            memory = self.currentProgram.getMemory()
+            return bool(memory.contains(space.getAddress(lowered)))
+        except Exception:
+            return None
+
     def search_bytes(self, pattern: bytes, max_results: int = 100) -> List[int]:
         import jpype
         from ghidra.util.task import TaskMonitor
