@@ -12,6 +12,7 @@ flow is exercised end-to-end.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -289,6 +290,87 @@ class _CLIBackendTestBase(unittest.TestCase):
                 bool(batched.get(addr)), bool(single_text),
                 f"batch and single disagree on 0x{addr:x}",
             )
+    def test_disassemble_address_range(self):
+        """--start/--stop disassembles a span, not a function."""
+        self._load_fauxware()
+        name = self._resolve_main_name()
+        func = json.loads(_run_cli("disassemble", name, "--json").stdout)
+        start = func["addr"]
+
+        result = _run_cli("disassemble", "--start", hex(start), "--count", "16", "--json")
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["start"], start)
+        self.assertEqual(payload["stop"], start + 16)
+        self.assertGreater(payload["instruction_count"], 0)
+        self.assertTrue(payload["text"].strip())
+        # The backend's own disassembly is preferred; capstone is only the
+        # fallback for backends without disassemble_range. Every backend under
+        # test implements it, so none of them should be falling back.
+        self.assertNotEqual(
+            payload["source"], "capstone",
+            "expected native backend disassembly, got the capstone fallback",
+        )
+
+    def test_disassemble_range_is_symbolized(self):
+        """Native range output must keep the backend's symbolization.
+
+        This is the whole reason range disassembly is a backend method rather
+        than capstone over read_memory: capstone renders `call 0x4970` where
+        the backend renders `call _strrchr`.
+        """
+        self._load_fauxware()
+        name = self._resolve_main_name()
+        start = json.loads(_run_cli("disassemble", name, "--json").stdout)["addr"]
+        payload = json.loads(
+            _run_cli("disassemble", "--start", hex(start), "--count", "256",
+                     "--json").stdout
+        )
+        if payload["source"] == "capstone":
+            self.skipTest("backend has no native range disassembly")
+        calls = [l for l in payload["text"].splitlines() if "call" in l.lower()]
+        if not calls:
+            self.skipTest("no call sites in the sampled span")
+        # At least one call operand should name something rather than being a
+        # bare hex address. Case-insensitive: Ghidra emits "CALL", angr and
+        # IDA emit "call", and a case-sensitive pattern would let one of them
+        # pass without actually checking anything.
+        bare = re.compile(r"call\s+(0x)?[0-9a-fA-F]+\s*$", re.IGNORECASE)
+        self.assertTrue(
+            any(not bare.search(c.rstrip()) for c in calls),
+            f"no symbolized call operand found in: {calls[:5]}",
+        )
+
+    def test_disassemble_range_starts_mid_function(self):
+        """A range need not begin at a function head -- that is the point.
+
+        The function-scoped form rejects a non-head address; the range form
+        must accept it, which is what makes it a replacement for
+        `objdump --start-address`.
+        """
+        self._load_fauxware()
+        name = self._resolve_main_name()
+        start = json.loads(_run_cli("disassemble", name, "--json").stdout)["addr"]
+        instructions = json.loads(
+            _run_cli("disassemble", "--start", hex(start), "--count", "16", "--json").stdout
+        )["instructions"]
+        # `size` is part of the contract for every instruction that has a
+        # successor to measure against -- both the native and capstone paths
+        # must provide it, or a consumer has to branch on `source`.
+        self.assertGreaterEqual(len(instructions), 2, "need two instructions to step")
+        self.assertIn("size", instructions[0])
+        mid = start + instructions[0]["size"]
+
+        payload = json.loads(
+            _run_cli("disassemble", "--start", hex(mid), "--count", "16", "--json").stdout
+        )
+        self.assertEqual(payload["instructions"][0]["addr"], mid)
+
+    def test_disassemble_range_rejects_empty_span(self):
+        self._load_fauxware()
+        result = _run_cli("disassemble", "--start", "0x1000", "--stop", "0x1000",
+                          check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("empty range", (result.stderr + result.stdout))
 
     def test_decompile_raw(self):
         """--raw should print text directly, not JSON-wrapped."""
@@ -2104,3 +2186,59 @@ class TestExportArgs(unittest.TestCase):
         self.assertEqual(_safe_filename("", 0x55), "00000055.c")
         # Two same-named functions at different addresses cannot collide.
         self.assertNotEqual(_safe_filename("f", 1), _safe_filename("f", 2))
+class TestDisassembleRangeArgs(unittest.TestCase):
+    """Range-disassembly plumbing that needs no backend or fixture binary."""
+
+    def test_target_is_optional_when_start_given(self):
+        from declib.cli.decompiler_cli import build_parser
+
+        args = build_parser().parse_args(
+            ["disassemble", "--start", "0x1000", "--stop", "0x1040"]
+        )
+        self.assertIsNone(args.target)
+        self.assertEqual(args.start, "0x1000")
+
+    def test_function_form_still_parses(self):
+        from declib.cli.decompiler_cli import build_parser
+
+        args = build_parser().parse_args(["disassemble", "main"])
+        self.assertEqual(args.target, "main")
+        self.assertIsNone(args.start)
+
+    def test_every_arch_choice_maps_to_real_capstone_constants(self):
+        """--arch choices must not advertise a mode capstone lacks."""
+        capstone = __import__("capstone")
+        from declib.cli.decompiler_cli import _CAPSTONE_ARCHS
+
+        for name, (arch_const, mode_const) in _CAPSTONE_ARCHS.items():
+            with self.subTest(arch=name):
+                self.assertTrue(hasattr(capstone, arch_const), f"{name}: {arch_const}")
+                self.assertTrue(hasattr(capstone, mode_const), f"{name}: {mode_const}")
+
+    def test_arch_detection_is_silent_when_backend_lacks_binary_arch(self):
+        """IDA/Ghidra raise on binary_arch; that is an answer, not an error.
+
+        Without silencing, every range disassembly on those backends prints a
+        red ERROR line from the client that reads like a real failure.
+        """
+        import logging
+        from declib.cli.decompiler_cli import _detect_arch
+
+        class _NoArchClient:
+            @property
+            def binary_arch(self):
+                logging.getLogger("declib.api.decompiler_client").error(
+                    "Request failed:  for property_get binary_arch"
+                )
+                raise RuntimeError("not implemented for this backend")
+
+        with self.assertNoLogs("declib.api.decompiler_client", level=logging.ERROR):
+            self.assertIsNone(_detect_arch(_NoArchClient()))
+
+    def test_arch_detection_maps_angr_names(self):
+        from declib.cli.decompiler_cli import _detect_arch
+
+        class _AngrClient:
+            binary_arch = "AMD64"
+
+        self.assertEqual(_detect_arch(_AngrClient()), "x86-64")

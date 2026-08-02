@@ -326,6 +326,14 @@ class IDAInterface(DecompilerInterface):
         lowered = self.art_lifter.lower_addr(addr)
         return compat.disassemble_function(lowered)
 
+    def disassemble_range(self, start: int, end: int, **kwargs) -> Optional[str]:
+        return compat.disassemble_range(
+            self.art_lifter.lower_addr(start), self.art_lifter.lower_addr(end)
+        )
+
+    def is_mapped(self, addr: int) -> Optional[bool]:
+        return compat.is_mapped(self.art_lifter.lower_addr(addr))
+
     def read_memory(self, addr: int, size: int) -> Optional[bytes]:
         if size <= 0:
             return b""
