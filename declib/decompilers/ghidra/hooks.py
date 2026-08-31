@@ -3,7 +3,7 @@ import typing
 from typing import Tuple, Optional
 import threading
 
-from ...artifacts import FunctionHeader, Function, FunctionArgument, StackVariable, GlobalVariable, Struct, Enum
+from ...artifacts import FunctionHeader, Function, FunctionArgument, StackVariable, GlobalVariable, Struct, Enum, Comment
 
 if typing.TYPE_CHECKING:
     from declib.decompilers.ghidra.interface import GhidraDecompilerInterface
@@ -53,8 +53,16 @@ class DataMonitor:
             ChangeManager.DOCR_IMAGE_BASE_CHANGED
         }
 
+        self.commentEvents = {
+            ChangeManager.DOCR_EOL_COMMENT_CHANGED,
+            ChangeManager.DOCR_PRE_COMMENT_CHANGED,
+            ChangeManager.DOCR_POST_COMMENT_CHANGED,
+            ChangeManager.DOCR_PLATE_COMMENT_CHANGED,
+            ChangeManager.DOCR_REPEATABLE_COMMENT_CHANGED,
+        }
+
         self.TrackedEvents = (
-            self.funcEvents | self.symDelEvents | self.symChgEvents | self.typeEvents | self.imageBaseEvents
+            self.funcEvents | self.symDelEvents | self.symChgEvents | self.typeEvents | self.imageBaseEvents | self.commentEvents
         )
 
     @JOverride
@@ -200,6 +208,25 @@ class DataMonitor:
                 new_base_addr = int(new_value.getOffset()) if new_value is not None else None
                 if new_base_addr is not None:
                     self._deci._binary_base_addr = new_base_addr
+            elif changeType in self.commentEvents:
+                addr = None
+                if hasattr(record, "getByteAddress") and record.getByteAddress() is not None:
+                    addr = int(record.getByteAddress().getOffset())
+                elif hasattr(record, "getOffset") and record.getOffset() is not None:
+                    addr = int(record.getOffset())
+                elif obj is not None and hasattr(obj, "getOffset"):
+                    addr = int(obj.getOffset())
+                elif obj is not None and hasattr(obj, "getAddress") and obj.getAddress() is not None:
+                    addr = int(obj.getAddress().getOffset())
+
+                if addr is not None:
+                    cmt = self._deci.get_comment(addr)
+                    if cmt and cmt.comment:
+                        self._deci.comment_changed(cmt, deleted=False)
+                    else:
+                        func_addr = self._deci.get_closest_function(addr) if hasattr(self._deci, "get_closest_function") else None
+                        del_cmt = Comment(addr=addr, comment="", func_addr=func_addr)
+                        self._deci.comment_changed(del_cmt, deleted=True)
 
 
 def create_data_monitor(deci: "GhidraDecompilerInterface"):

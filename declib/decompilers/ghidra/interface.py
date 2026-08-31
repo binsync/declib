@@ -968,25 +968,109 @@ class GhidraDecompilerInterface(DecompilerInterface):
 
         return structs
 
+    def _code_unit_to_comment(self, code_unit) -> Optional[Comment]:
+        if code_unit is None:
+            return None
+
+        from .compat.imports import CodeUnit
+
+        ordered_types = (
+            (CodeUnit.PLATE_COMMENT, "PLATE", False),
+            (CodeUnit.PRE_COMMENT, "PRE", True),
+            (CodeUnit.EOL_COMMENT, "EOL", False),
+            (CodeUnit.POST_COMMENT, "POST", False),
+            (CodeUnit.REPEATABLE_COMMENT, "REPEATABLE", False),
+        )
+
+        comment_entries = []
+        for cmt_type, label, is_decompiled_type in ordered_types:
+            text = code_unit.getComment(cmt_type)
+            if not text:
+                continue
+            comment_entries.append((label, str(text), is_decompiled_type))
+
+        if not comment_entries:
+            return None
+
+        should_prefix = len(comment_entries) > 1
+        parts = [
+            f"[{label}] {text}" if should_prefix else text
+            for label, text, _ in comment_entries
+        ]
+        has_decompiled = any(is_decompiled for _, _, is_decompiled in comment_entries)
+        has_disassembly = any(not is_decompiled for _, _, is_decompiled in comment_entries)
+        addr = int(code_unit.getAddress().getOffset())
+        func_addr = self.get_closest_function(addr) if hasattr(self, "get_closest_function") else None
+        return Comment(
+            addr=addr,
+            comment="\n".join(parts),
+            decompiled=has_decompiled and not has_disassembly,
+            func_addr=func_addr,
+        )
+
     @ghidra_transaction
     def _set_comment(self, comment: Comment, **kwargs) -> bool:
         from .compat.imports import CodeUnit, SetCommentCmd
+
+        if not comment or not comment.comment:
+            return self._del_comment(comment.addr)
+
+        gaddr = self._to_gaddr(comment.addr)
+
+        tag_map = {
+            "[PLATE]": CodeUnit.PLATE_COMMENT,
+            "[PRE]": CodeUnit.PRE_COMMENT,
+            "[EOL]": CodeUnit.EOL_COMMENT,
+            "[POST]": CodeUnit.POST_COMMENT,
+            "[REPEATABLE]": CodeUnit.REPEATABLE_COMMENT,
+        }
+
+        has_tags = any(tag in comment.comment for tag in tag_map)
+        if has_tags:
+            self._del_comment(comment.addr)
+            lines = comment.comment.split("\n")
+            current_tag = None
+            current_lines = []
+
+            def flush_slot(tag, text_lines):
+                if tag in tag_map and text_lines:
+                    slot_type = tag_map[tag]
+                    slot_text = "\n".join(text_lines)
+                    SetCommentCmd(gaddr, slot_type, slot_text).applyTo(self.currentProgram)
+
+            for line in lines:
+                found_tag = None
+                for tag in tag_map:
+                    if line.startswith(tag):
+                        found_tag = tag
+                        break
+                if found_tag:
+                    if current_tag:
+                        flush_slot(current_tag, current_lines)
+                    current_tag = found_tag
+                    current_lines = [line[len(found_tag):].strip()]
+                else:
+                    if current_tag:
+                        current_lines.append(line)
+                    else:
+                        current_lines.append(line)
+            if current_tag:
+                flush_slot(current_tag, current_lines)
+            return True
 
         cmt_type = CodeUnit.PRE_COMMENT if comment.decompiled else CodeUnit.EOL_COMMENT
         if comment.addr == comment.func_addr:
             cmt_type = CodeUnit.PLATE_COMMENT
 
-        if comment.comment:
-            # TODO: check if comment already exists, and append?
-            return SetCommentCmd(
-                self._to_gaddr(comment.addr), cmt_type, comment.comment
-            ).applyTo(self.currentProgram)
-        return True
+        return SetCommentCmd(
+            gaddr, cmt_type, comment.comment
+        ).applyTo(self.currentProgram)
 
     def _get_comment(self, addr) -> Optional[Comment]:
-        # TODO: speedup needed here, see global vars for example
-        comments = self._comments()
-        return comments.get(addr, None)
+        gaddr = self._to_gaddr(addr)
+        listing = self.currentProgram.getListing()
+        code_unit = listing.getCodeUnitAt(gaddr)
+        return self._code_unit_to_comment(code_unit)
 
     @ghidra_transaction
     def _del_comment(self, addr) -> bool:
@@ -1006,46 +1090,19 @@ class GhidraDecompilerInterface(DecompilerInterface):
         return removed
 
     def _comments(self) -> Dict[int, Comment]:
-        from .compat.imports import CodeUnit
-
-        # Ghidra stores multiple comment slots per code unit, while declib has one
-        # portable Comment per address. Preserve all populated text and label the
-        # slots when more than one has to collapse into the same Comment.
-        ordered_types = (
-            (CodeUnit.PLATE_COMMENT, "PLATE", False),
-            (CodeUnit.PRE_COMMENT, "PRE", True),
-            (CodeUnit.EOL_COMMENT, "EOL", False),
-            (CodeUnit.POST_COMMENT, "POST", False),
-            (CodeUnit.REPEATABLE_COMMENT, "REPEATABLE", False),
-        )
-
         comments = {}
         listing = self.currentProgram.getListing()
-        for func in self.currentProgram.getFunctionManager().getFunctions(True):
-            for code_unit in listing.getCodeUnits(func.getBody(), True):
-                comment_entries = []
-                for cmt_type, label, is_decompiled_type in ordered_types:
-                    text = code_unit.getComment(cmt_type)
-                    if not text:
-                        continue
-                    comment_entries.append((label, str(text), is_decompiled_type))
+        min_addr = self.currentProgram.getMinAddress()
+        max_addr = self.currentProgram.getMaxAddress()
+        if min_addr is None or max_addr is None:
+            return comments
 
-                if not comment_entries:
-                    continue
-
-                should_prefix = len(comment_entries) > 1
-                parts = [
-                    f"[{label}] {text}" if should_prefix else text
-                    for label, text, _ in comment_entries
-                ]
-                has_decompiled = any(is_decompiled for _, _, is_decompiled in comment_entries)
-                has_disassembly = any(not is_decompiled for _, _, is_decompiled in comment_entries)
-                addr = int(code_unit.getAddress().getOffset())
-                comments[addr] = Comment(
-                    addr=addr,
-                    comment="\n".join(parts),
-                    decompiled=has_decompiled and not has_disassembly,
-                )
+        comment_addrs = listing.getCommentAddressIterator(min_addr, max_addr, True)
+        for gaddr in comment_addrs:
+            code_unit = listing.getCodeUnitAt(gaddr)
+            cmt = self._code_unit_to_comment(code_unit)
+            if cmt:
+                comments[cmt.addr] = cmt
 
         return comments
 
